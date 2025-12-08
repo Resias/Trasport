@@ -160,8 +160,7 @@ def build_global_station_dict(parquet_files):
 
         stations.update(df["승차역명"].tolist())
         stations.update(df["하차역명"].tolist())
-
-    # 🔥 Unknown 제거
+    # Unknown 제거
     if "Unknown" in stations:
         stations.remove("Unknown")
 

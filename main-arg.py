@@ -97,15 +97,27 @@ def processing_log(src_path, out_path, metro_df):
                 sep="|",
                 header=None,
                 dtype=str,
-                na_values=["", " ", "NA", "NaN", "nan"],
-                names = COLS
+                names=COLS, #+ ["_trash"],   # 26번째 컬럼 버릴 이름 추가
+                usecols=list(range(25)),   # 앞 25개만 읽기 → 나머지 무시
+                na_values=["", " ", "NA", "NaN", "nan"]
             )
+            # print(df.iloc[0])
+            # print(df.iloc[-1])
+            # bad_lines = []
+            # with open(file_path) as f:
+            #     for i, line in enumerate(f):
+            #         if len(line.split("|")) != 25:
+            #             bad_lines.append((i, line))
+
+            # print("문제 있는 라인 수:", len(bad_lines))
+            
             
             mask = np.isin(df.iloc[:,9 ],list(metro_num)) # 교통수단코드 9번 열
             origin = np.isin(df.iloc[:,15],list(line_2)) # 승차정류장ID(정산사업자) 15번 열
             dest = np.isin(df.iloc[:,18],list(line_2)) # 하차정류장ID(정산사업자) 18번 열
 
-            df = df[mask & (origin | dest )]   
+            # df = df[mask & (origin | dest )]
+            df = df[mask]  
             
             df["승차정류장ID(정산사업자)"] = numberic_norm(df["승차정류장ID(정산사업자)"])
             df["하차정류장ID(정산사업자)"] = numberic_norm(df["하차정류장ID(정산사업자)"])
@@ -116,6 +128,8 @@ def processing_log(src_path, out_path, metro_df):
                 "승차일시", "하차일시","트랜잭션ID","환승횟수"
             ]
             df = df[filter]
+            # print(df)
+            # exit()
             mapped_log = mapping_log(df, metro_df)
             date_log(mapped_log)
             
@@ -140,11 +154,12 @@ def main():
     parser = argparse.ArgumentParser(description="지하철 데이터 처리 스크립트")
     parser.add_argument("--src", required=True, help="input TXT folder path")
     parser.add_argument("--out", required=True, help="output Parquet folder path")
-    parser.add_argument("--line_info", help="line info xlsx file path")
+    parser.add_argument("--line_info", required=True, help="line info xlsx file path")
     args = parser.parse_args()
 
-    try:        
+    try:
         metro = np.load("./metro.npy",allow_pickle=True)
+        print("metro: ", metro[:10])
     except:
         if args.line_info is None:
             raise ValueError("line_info xlsx file path is required when metro.npy does not exist.")
