@@ -28,8 +28,8 @@ def parse_args():
     parser.add_argument("--window_size", type=int, default=60)
     parser.add_argument("--pred_size", type=int, default=30)
     parser.add_argument("--hop_size", type=int, default=10)
-    parser.add_argument("--batch_size", type=int, default=32)
-    parser.add_argument("--num_workers", type=int, default=0)
+    parser.add_argument("--batch_size", type=int, default=16)
+    parser.add_argument("--num_workers", type=int, default=2)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--max_epochs", type=int, default=300)
     parser.add_argument("--gnn_hidden", type=int, default=64)
@@ -72,7 +72,10 @@ def main():
         num_workers=args.num_workers,
     )
 
-    od_df = pd.read_csv(args.od_csv, index_col='index_col')
+    # od_df = pd.read_csv(args.od_csv, index_col='index_col')
+    od_df = pd.read_csv(args.od_csv, index_col=0)
+    od_df = od_df.apply(pd.to_numeric, errors='coerce').fillna(0)
+    
     sample = valset[0]
     in_feat = sample['x_tensor'].shape[-1]
     time_emb_dim = sample['time_enc_hist'].shape[-1]
