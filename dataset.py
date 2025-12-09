@@ -6,7 +6,7 @@ import argparse
 import numpy as np
 from tqdm import tqdm
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader
 
 
 def build_time_sin_cos(minute_indices, period=1440):
@@ -24,132 +24,11 @@ def build_time_sin_cos(minute_indices, period=1440):
     enc = np.stack([sin_vals, cos_vals], axis=-1)  # [T, 2]
     return torch.tensor(enc, dtype=torch.float32)
 
-
-
 def weekday_onehot(weekday):
     # weekday: 0~6  (월~일)
     onehot = np.zeros(7, dtype=np.float32)
     onehot[weekday] = 1.0
     return torch.tensor(onehot, dtype=torch.float32)  # (7,)
-
-
-class ODPairDataset(Dataset):
-    """
-    OD Pair 기반 시계열 예측 Dataset
-    - 원본 데이터는 (1440, N, N)
-    - 특정 (i,j) OD 흐름만 추출하여 (1440,) 시계열 생성
-    - 윈도우 슬라이싱 후 (T_in, F) 형태로 반환
-    """
-
-    def __init__(self,
-                 data_root,
-                 window_size,
-                 hop_size,
-                 pred_size,
-                 od_i,
-                 od_j,
-                 use_weekday=True,
-                 use_time_enc=True):
-        super().__init__()
-        self.data_root = data_root
-        self.window_size = window_size
-        self.hop_size = hop_size
-        self.pred_size = pred_size
-        self.i = od_i
-        self.j = od_j
-        self.use_weekday = use_weekday
-        self.use_time_enc = use_time_enc
-
-        self.day_start_minute = 5 * 60 + 30  # 05:30
-        self.day_end_minute = 24 * 60        # 1440
-
-        info_list = []
-        data_list = []
-
-        file_names = sorted(os.listdir(data_root))
-
-        for file_idx, file_name in enumerate(file_names):
-
-            ymd = file_name.split('_')[-1].split('.')[0]
-            date = datetime.date(int(ymd[0:4]), int(ymd[4:6]), int(ymd[6:8]))
-            weekday = date.weekday()
-
-            file_path = os.path.join(data_root, file_name)
-
-            for start_idx in range(
-                self.day_start_minute,
-                self.day_end_minute - (window_size + pred_size),
-                hop_size
-            ):
-                info_list.append({
-                    "file_idx": file_idx,
-                    "start_idx": start_idx,
-                    "weekday": weekday,
-                })
-
-            data_list.append(file_path)
-
-        self.info_list = info_list
-        self.data_list = data_list
-
-    def __len__(self):
-        return len(self.info_list)
-
-    def __getitem__(self, index):
-        info = self.info_list[index]
-
-        file_idx = info["file_idx"]
-        start_idx = info["start_idx"]
-        weekday = info["weekday"]
-        file_path = self.data_list[file_idx]
-
-        # Load daily OD matrix (1440, N, N)
-        day_data = np.load(file_path)  # (1440, 637, 637)
-
-        # Extract OD pair time series → (1440,)
-        full_seq = day_data[:, self.i, self.j]
-
-        # Windowing
-        x_vals = full_seq[start_idx:start_idx + self.window_size]           # (T_in,)
-        y_vals = full_seq[start_idx + self.window_size:
-                          start_idx + self.window_size + self.pred_size]    # (T_out,)
-
-        # Time features
-        hist_minutes = np.arange(start_idx, start_idx + self.window_size) % 1440  # (T_in,)
-        fut_minutes = np.arange(start_idx + self.window_size,
-                                start_idx + self.window_size + self.pred_size) % 1440
-
-        # build time encoding
-        time_enc_hist = build_time_sin_cos(hist_minutes)  # (T_in, 2)
-
-        # weekday encoding (global to window)
-        weekday_oh = weekday_onehot(weekday).unsqueeze(0).repeat(self.window_size, 1)  # (T_in, 7)
-
-        # OD flow values → (T_in, 1)
-        flow_vals = torch.tensor(x_vals, dtype=torch.float32).unsqueeze(-1)
-
-        # ------------------------------
-        # Final feature concat: (T_in, F)
-        # F = 2 (sin/cos) + 7 (weekday) + 1 (flow) = 10
-        # ------------------------------
-        feat_list = [flow_vals]
-
-        if self.use_time_enc:
-            feat_list.append(time_enc_hist)    # (T_in, 2)
-
-        if self.use_weekday:
-            feat_list.append(weekday_oh)       # (T_in, 7)
-
-        x_feat = torch.cat(feat_list, dim=1)  # (T_in, F)
-
-        y_feat = torch.tensor(y_vals, dtype=torch.float32).unsqueeze(-1)  # (T_out, 1)
-
-        return {
-            "x": x_feat,      # (T_in, F)
-            "y": y_feat,      # (T_out, 1)
-            "weekday": weekday,
-            "time_hist": time_enc_hist,
-        }
 
 class MetroDataset(Dataset):
     """
@@ -247,7 +126,110 @@ class MetroDataset(Dataset):
             "time_enc_fut": time_enc_fut,    # [T_out, 2]
         }
         return sample
-    
+
+
+class ODPairDatasetV2(Dataset):
+    """
+    MetroDataset 구조를 그대로 참고한 OD Pair Dataset
+    - 특정 OD pair (i, j)에 대한 시계열만 추출
+    - sliding window 적용
+    - 최종 입력: (T_in, F)
+    - 최종 출력: (T_out, 1)
+    """
+
+    def __init__(self, data_root, window_size, hop_size, pred_size,
+                 od_i, od_j,
+                 use_weekday=True,
+                 use_time_encoding=True):
+        super().__init__()
+
+        self.data_root = data_root
+        self.window_size = window_size
+        self.hop_size = hop_size
+        self.pred_size = pred_size
+        self.i = od_i
+        self.j = od_j
+        self.use_weekday = use_weekday
+        self.use_time_encoding = use_time_encoding
+
+        self.day_start_minute = 5 * 60 + 30  # 330
+        self.day_end_minute = 24 * 60        # 1440
+
+        self.info_list = []
+        self.data_list = []
+
+        file_names = sorted(os.listdir(data_root))
+
+        for file_idx, file_name in enumerate(file_names):
+            # 날짜 정보 추출
+            ymd = file_name.split('_')[-1].split('.')[0]
+            date = datetime.date(int(ymd[:4]), int(ymd[4:6]), int(ymd[6:8]))
+            weekday = date.weekday()
+
+            file_path = os.path.join(data_root, file_name)
+
+            # sliding window 위치 생성
+            for start_idx in range(
+                self.day_start_minute,
+                self.day_end_minute - (self.window_size + self.pred_size),
+                self.hop_size
+            ):
+                self.info_list.append({
+                    "file_idx": file_idx,
+                    "weekday": weekday,
+                    "start_idx": start_idx,
+                })
+
+            self.data_list.append(file_path)
+
+    def __len__(self):
+        return len(self.info_list)
+
+    def __getitem__(self, index):
+        info = self.info_list[index]
+        file_idx = info["file_idx"]
+        weekday = info["weekday"]
+        start_idx = info["start_idx"]
+
+        # load daily OD matrix (1440, N, N)
+        day_data = np.load(self.data_list[file_idx])
+
+        # extract OD pair series → (1440,)
+        od_seq = day_data[:, self.i, self.j].astype(np.float32)
+
+        # window slicing
+        x_vals = od_seq[start_idx:start_idx + self.window_size]              # (T_in,)
+        y_vals = od_seq[start_idx + self.window_size:start_idx + self.window_size + self.pred_size]  # (T_out,)
+
+        # time sin/cos encoding
+        hist_minutes = np.arange(start_idx, start_idx + self.window_size) % 1440
+        time_enc_hist = build_time_sin_cos(hist_minutes)                    # (T_in, 2)
+
+        # weekday one-hot
+        weekday_oh = weekday_onehot(weekday).unsqueeze(0).repeat(self.window_size, 1)  # (T_in, 7)
+
+        # OD flow values
+        flow_feature = torch.tensor(x_vals, dtype=torch.float32).unsqueeze(-1)  # (T_in, 1)
+
+        feat_list = [flow_feature]
+        if self.use_time_encoding:
+            feat_list.append(time_enc_hist)
+        if self.use_weekday:
+            feat_list.append(weekday_oh)
+
+        # final input shape = (T_in, F)
+        x_feat = torch.cat(feat_list, dim=1)
+
+        # output shape = (T_out, 1)
+        y_feat = torch.tensor(y_vals, dtype=torch.float32).unsqueeze(-1)
+
+        return {
+            "x": x_feat,      # (T_in, F)
+            "y": y_feat,      # (T_out, 1)
+            "weekday": weekday,
+            "start_idx": start_idx,
+        }
+
 
 class CacheDataset(Dataset):
     def __init__(self, pt_path):
@@ -299,6 +281,23 @@ def get_dataset(data_root, train_subdir, val_subdir, window_size, hop_size, pred
     # torch.save(val_tensor, val_pt)
     
     return trainset, valset
+
+
+def get_odpair_dataset(data_root, train_subdir, val_subdir,
+                       window_size, hop_size, pred_size, od_i, od_j):
+    trainset = ODPairDatasetV2(
+        os.path.join(data_root, train_subdir),
+        window_size, hop_size, pred_size,
+        od_i, od_j
+    )
+    valset = ODPairDatasetV2(
+        os.path.join(data_root, val_subdir),
+        window_size, hop_size, pred_size,
+        od_i, od_j
+    )
+    return trainset, valset
+
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

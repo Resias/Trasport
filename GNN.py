@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+import torch.nn.functional as Fun
 import numpy as np
 
 
@@ -33,12 +33,31 @@ class SimpleGCNLayer(nn.Module):
         super().__init__()
         self.lin = nn.Linear(in_dim, out_dim)
 
-    def forward(self, x, A_norm):
-        # x: [B*N, F_in], we reshape before calling this
-        # But simpler: x is [B, N, F]. Let's keep original
-        x_agg = torch.einsum("ij,bjf->bif", A_norm, x)  # [B, N, F]
+    def forward(self, x, A_norm_sparse):
+        # 이전에는 A_norm으로 넘겨줬음
+        # # x: [B*N, F_in], we reshape before calling this
+        # # But simpler: x is [B, N, F]. Let's keep original
+        # x_agg = torch.einsum("ij,bjf->bif", A_norm, x)  # [B, N, F]
+        # out = self.lin(x_agg)
+        # return F.relu(out)
+        # 위가 기존
+        """
+        x: [B2, N, F_in]
+        A_norm_sparse: [N, N] sparse tensor
+        """
+        B2, N, F = x.shape
+
+        # [B2, N, F] -> [N, B2*F]
+        x2 = x.transpose(0, 1).reshape(N, B2 * F)  # [N, B2*F]
+
+        # sparse matmul: [N, N] x [N, B2*F] -> [N, B2*F]
+        agg = torch.sparse.mm(A_norm_sparse, x2)
+
+        # [N, B2*F] -> [B2, N, F]
+        x_agg = agg.reshape(N, B2, F).transpose(0, 1)  # [B2, N, F]
+
         out = self.lin(x_agg)
-        return F.relu(out)
+        return Fun.relu(out)
 
 
 # ---------------------------------------------------
@@ -75,7 +94,8 @@ class MetroGNNForecaster(nn.Module):
         # Register adjacency
         A_norm = build_normalized_adj_from_df(od_df, device=device)
         self.register_buffer("A_norm", A_norm)
-
+        # Register adjacency (dense + sparse)
+        self.register_buffer("A_norm_sparse", A_norm.to_sparse())  # sparse 버전 추가
         # --------------------
         # Condition embeddings
         # --------------------
@@ -174,8 +194,14 @@ class MetroGNNForecaster(nn.Module):
 
         # reshape for GCN time-step wise
         gcn_input = gcn_input.view(B*T_in, N, -1)  # [B*T, N, F_gcn]
-        spatial_out = self.gcn(gcn_input, self.A_norm)       # [B*T, N, gnn_hidden]
-        spatial_out = spatial_out.view(B, T_in, N, -1)        # [B,T_in,N,H]
+        
+        # 이게 기존
+        # spatial_out = self.gcn(gcn_input, self.A_norm)       # [B*T, N, gnn_hidden]
+        # spatial_out = spatial_out.view(B, T_in, N, -1)        # [B,T_in,N,H]
+        
+        # 이게 수정
+        spatial_out = self.gcn(gcn_input, self.A_norm_sparse)   # [B*T_in, N, gnn_hidden]
+        spatial_out = spatial_out.view(B, T_in, N, -1)          # [B,T_in,N,H]
 
         # temporal encoder input: flatten node dim
         enc_in = spatial_out.transpose(1, 2).reshape(B*N, T_in, -1)  # [B*N,T_in,H]

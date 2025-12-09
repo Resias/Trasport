@@ -10,6 +10,9 @@ from torch.utils.data import DataLoader
 import pytorch_lightning as L
 from pytorch_lightning.loggers import WandbLogger
 
+torch.backends.cudnn.enabled = True
+torch.backends.cudnn.benchmark = True
+
 
 def resolve_accelerator():
     if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
@@ -28,7 +31,7 @@ def parse_args():
     parser.add_argument("--window_size", type=int, default=60)
     parser.add_argument("--pred_size", type=int, default=30)
     parser.add_argument("--hop_size", type=int, default=10)
-    parser.add_argument("--batch_size", type=int, default=16)
+    parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--num_workers", type=int, default=2)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--max_epochs", type=int, default=300)
@@ -63,6 +66,8 @@ def main():
         shuffle=True,
         drop_last=False,
         num_workers=args.num_workers,
+        pin_memory=True,
+        persistent_workers=(args.num_workers > 0),
     )
     val_loader = DataLoader(
         valset,
@@ -70,6 +75,8 @@ def main():
         shuffle=False,
         drop_last=False,
         num_workers=args.num_workers,
+        pin_memory=True,
+        persistent_workers=(args.num_workers > 0),
     )
 
     # od_df = pd.read_csv(args.od_csv, index_col='index_col')
@@ -115,8 +122,9 @@ def main():
         max_epochs=args.max_epochs,
         accelerator=accelerator,
         devices=1,
-        log_every_n_steps=10,
+        log_every_n_steps=50,
         logger=wandb_logger,
+        # precision="16-mixed",   # <- 추가
     )
     trainer.fit(metroLM, train_dataloaders=train_loader, val_dataloaders=val_loader)
 
