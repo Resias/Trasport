@@ -48,6 +48,12 @@ import re
 #         return SPECIAL_MAP[name]
 
 #     return remove_parentheses(name)
+
+def extract_date_from_filename(path: str):
+    # 예: TCD_20220501.parquet → 20220501
+    m = re.search(r'(\d{8})', os.path.basename(path))
+    return m.group(1) if m else None
+
 def remove_parentheses(name: str):
     """괄호와 그 안 내용 제거"""
     return re.sub(r"\(.*?\)", "", name).strip()
@@ -141,12 +147,23 @@ def validate_minute_od(od_path, parquet_files, station2id):
     # Unknown 제외한 전체 승차 수 계산
     total_rides = 0
     for f in parquet_files:
-        df = pd.read_parquet(f, columns=["승차역명", "하차역명"])
+        df = pd.read_parquet(f, columns=["승차역명", "하차역명", "승차일시"])
         df["승차역명"] = df["승차역명"].apply(normalize_station_name)
         df["하차역명"] = df["하차역명"].apply(normalize_station_name)
-        df = df[df["승차역명"].isin(station2id)]
-        df = df[df["하차역명"].isin(station2id)]
+        # df = df[df["승차역명"].isin(station2id)]
+        # df = df[df["하차역명"].isin(station2id)]
+        
+        df["승차역명"] = df["승차역명"].fillna("Unknown")
+        df["하차역명"] = df["하차역명"].fillna("Unknown")
+
         df = df[(df["승차역명"] != "Unknown") & (df["하차역명"] != "Unknown")]
+        
+
+        df["승차일시_dt"] = pd.to_datetime(df["승차일시"], errors="coerce")
+        df = df.dropna(subset=["승차일시_dt"])
+
+        df["minute_idx"] = df["승차일시_dt"].dt.hour * 60 + df["승차일시_dt"].dt.minute
+        df = df[(df["minute_idx"] >= 0) & (df["minute_idx"] < 1440)]
         total_rides += len(df)
 
     od_sum = OD.sum()
@@ -199,12 +216,14 @@ def check_missing_station_names(parquet_files, station2id):
 # =====================================================
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data", default="./202205/train_pars")
+    parser.add_argument("--data", nargs="+", default=["./202205/train_pars","./202206/train_pars"])
     parser.add_argument("--od_dir", default="./od_minute")
     parser.add_argument("--save_json", default="./station2id.json")
     args = parser.parse_args()
 
-    parquet_files = sorted(glob.glob(os.path.join(args.data, "*.parquet")))
+    parquet_files = []
+    for d in args.data:
+        parquet_files.extend(sorted(glob.glob(os.path.join(d, "*.parquet"))))
     if not parquet_files:
         print("❌ parquet 없음")
         return
@@ -232,8 +251,14 @@ def main():
     import random
     idx = random.randrange(0,len(od_files))
     sample_od = od_files[idx]
-    date = os.path.basename(sample_od).split("_")[2].split(".")[0]
-    day_files = [f for f in parquet_files if date in f]
+    od_date = extract_date_from_filename(sample_od)
+    day_files = [f for f in parquet_files if extract_date_from_filename(f) == od_date]
+
+    print("\n[DEBUG] 선택된 OD 파일:", sample_od)
+    print("[DEBUG] 추출한 날짜:", od_date)
+    print("[DEBUG] 매칭된 parquet 개수:", len(day_files))
+    for f in day_files:
+        print("  -", f)
 
     validate_minute_od(sample_od, day_files, station2id)
 
