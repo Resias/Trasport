@@ -8,8 +8,11 @@ from torch.utils.data import DataLoader
 from pytorch_lightning.loggers import WandbLogger
 
 from dataset import get_odpair_dataset
-from model_tcn import TCN_Attention_LSTM
-from trainer_tcn import TCNMetroLM
+from benchmark_Model.TCNbased import TCN_Attention_LSTM
+from trainer import TCNMetroLM
+
+torch.backends.cudnn.enabled = True
+torch.backends.cudnn.benchmark = True
 
 
 def resolve_accelerator():
@@ -34,8 +37,8 @@ def parse_args():
     parser.add_argument("--od_i", type=int, default=10)
     parser.add_argument("--od_j", type=int, default=20)
 
-    parser.add_argument("--batch_size", type=int, default=32)
-    parser.add_argument("--num_workers", type=int, default=4)
+    parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--num_workers", type=int, default=1)
 
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--max_epochs", type=int, default=50)

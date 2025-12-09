@@ -55,33 +55,32 @@ class MetroDataset(Dataset):
         self.day_start_minute = 5 * 60 + 30  # 05:30 -> 330
         self.day_end_minute = 24 * 60        # 24:00 -> 1440
 
-        info_list = []
-        data_list = []
-
         # 파일들을 날짜 순으로 정렬
         file_names = sorted(os.listdir(data_root))
+        self.data_paths = [os.path.join(data_root, f) for f in file_names]
 
+        # ---- 2) 파일 전체 로드 (메모리 캐싱) ----
+        print("Caching OD matrices into memory...")
+        self.day_data_cache = []
+        for path in tqdm(self.data_paths):
+            arr = np.load(path)  # shape: [1440, N, N]
+            self.day_data_cache.append(torch.tensor(arr, dtype=torch.float32))
+        print("Caching completed.")
+        
+        # ---- 3) sliding window 정보 생성 ----
+        self.info_list = []
         for file_idx, file_name in enumerate(file_names):
-
             # 파일명에서 날짜 추출 (예: something_YYYYMMDD.npy)
             ymd = file_name.split('_')[-1].split('.')[0]
             date = datetime.date(int(ymd[0:4]), int(ymd[4:6]), int(ymd[6:8]))
             weekday = date.weekday()  # 0=월, 6=일
 
-            file_path = os.path.join(data_root, file_name)
-            
-
             for start_idx in range(self.day_start_minute, self.day_end_minute-(self.pred_size+self.window_size), hop_size):
-                info_list.append({
+                self.info_list.append({
                     "file_idx": file_idx,
                     "start_idx": start_idx,
                     "weekday": weekday,
                 })
-
-            data_list.append(file_path)
-
-        self.info_list = info_list
-        self.data_list = data_list
 
     def __len__(self):
         return len(self.info_list)
@@ -92,40 +91,29 @@ class MetroDataset(Dataset):
         start_idx = info["start_idx"]
         weekday = info["weekday"]
 
-        file_path = self.data_list[file_idx]  # [T_day, N, N]
-        day_data = np.load(file_path)  # [1440, N, N] 가정
-        # 입력/출력 시퀀스 추출
-        x_np = day_data[start_idx:start_idx + self.window_size]  # [T_in, N, N]
-        y_np = day_data[start_idx + self.window_size:
-                        start_idx + self.window_size + self.pred_size]  # [T_out, N, N]
+        # -------- Memory Cache에서 바로 가져오기 ----------
+        day_data = self.day_data_cache[file_idx]  # (1440, N, N)
+        
+        # slicing
+        x_tensor = day_data[start_idx:start_idx+self.window_size]  
+        y_tensor = day_data[start_idx+self.window_size:
+                            start_idx+self.window_size+self.pred_size]
 
-        # 입력 구간 시간
-        hist_minutes = np.arange(start_idx, start_idx+self.window_size, 1)
-        # 출력 구간 시간
-        fut_minutes = np.arange(start_idx+self.window_size, start_idx + self.window_size + self.pred_size, 1)
+        # time encoding
+        hist_minutes = torch.arange(start_idx, start_idx+self.window_size) % 1440
+        fut_minutes = torch.arange(start_idx+self.window_size,
+                                   start_idx+self.window_size+self.pred_size) % 1440
 
-        # 혹시 24:00를 넘어갈 일은 현재 설계상 없지만,
-        # 일반성을 위해 modulo 1440을 취해도 됨.
-        hist_minutes = hist_minutes % 1440
-        fut_minutes = fut_minutes % 1440
+        time_enc_hist = build_time_sin_cos(hist_minutes.numpy())
+        time_enc_fut = build_time_sin_cos(fut_minutes.numpy())
 
-        # --- 분단위 sin/cos 인코딩 생성 ---
-        time_enc_hist = build_time_sin_cos(hist_minutes)  # [T_in, 2]
-        time_enc_fut = build_time_sin_cos(fut_minutes)    # [T_out, 2]
-
-        # --- tensor 변환 ---
-        x_tensor = torch.tensor(x_np, dtype=torch.float32)  # [T_in, N, N]
-        y_tensor = torch.tensor(y_np, dtype=torch.float32)  # [T_out, N, N]
-        weekday_tensor = torch.tensor(weekday, dtype=torch.long)
-
-        sample = {
-            "x_tensor": x_tensor,
+        return {
+            "x_tensor": x_tensor,      # (T_in, N, N)
             "y_tensor": y_tensor,
-            "weekday_tensor": weekday_tensor,
-            "time_enc_hist": time_enc_hist,  # [T_in, 2]
-            "time_enc_fut": time_enc_fut,    # [T_out, 2]
+            "weekday_tensor": torch.tensor(weekday),
+            "time_enc_hist": time_enc_hist,
+            "time_enc_fut": time_enc_fut
         }
-        return sample
 
 
 class ODPairDatasetV2(Dataset):
@@ -159,16 +147,25 @@ class ODPairDatasetV2(Dataset):
         self.data_list = []
 
         file_names = sorted(os.listdir(data_root))
+        self.data_paths = [os.path.join(data_root, f) for f in file_names]
 
-        for file_idx, file_name in enumerate(file_names):
-            # 날짜 정보 추출
+        # ---- 1) 하루치 파일 전체 메모리 캐싱 ----
+        print("Caching OD matrices for ODPairDataset...")
+        self.day_data_cache = []
+        self.weekday_list = []
+        for file_name in file_names:
             ymd = file_name.split('_')[-1].split('.')[0]
             date = datetime.date(int(ymd[:4]), int(ymd[4:6]), int(ymd[6:8]))
-            weekday = date.weekday()
+            self.weekday_list.append(date.weekday())
 
-            file_path = os.path.join(data_root, file_name)
+        for path in tqdm(self.data_paths):
+            arr = np.load(path)
+            self.day_data_cache.append(torch.tensor(arr, dtype=torch.float32))  
+        print("Caching completed.")
 
-            # sliding window 위치 생성
+        # ---- 2) sliding window 정의 ----
+        self.info_list = []
+        for file_idx, wd in enumerate(self.weekday_list):
             for start_idx in range(
                 self.day_start_minute,
                 self.day_end_minute - (self.window_size + self.pred_size),
@@ -176,11 +173,9 @@ class ODPairDatasetV2(Dataset):
             ):
                 self.info_list.append({
                     "file_idx": file_idx,
-                    "weekday": weekday,
+                    "weekday": wd,
                     "start_idx": start_idx,
                 })
-
-            self.data_list.append(file_path)
 
     def __len__(self):
         return len(self.info_list)
@@ -191,44 +186,38 @@ class ODPairDatasetV2(Dataset):
         weekday = info["weekday"]
         start_idx = info["start_idx"]
 
-        # load daily OD matrix (1440, N, N)
-        day_data = np.load(self.data_list[file_idx])
+        # -------- 캐싱된 메모리에서 가져오기 --------
+        day_data = self.day_data_cache[file_idx]  # (1440, N, N)
 
-        # extract OD pair series → (1440,)
-        od_seq = day_data[:, self.i, self.j].astype(np.float32)
+        # 특정 OD pair 시계열 추출
+        od_seq = day_data[:, self.i, self.j]  # (1440,)
 
         # window slicing
-        x_vals = od_seq[start_idx:start_idx + self.window_size]              # (T_in,)
-        y_vals = od_seq[start_idx + self.window_size:start_idx + self.window_size + self.pred_size]  # (T_out,)
+        x_vals = od_seq[start_idx:start_idx+self.window_size]
+        y_vals = od_seq[start_idx+self.window_size:
+                        start_idx+self.window_size+self.pred_size]
 
-        # time sin/cos encoding
-        hist_minutes = np.arange(start_idx, start_idx + self.window_size) % 1440
-        time_enc_hist = build_time_sin_cos(hist_minutes)                    # (T_in, 2)
-
-        # weekday one-hot
-        weekday_oh = weekday_onehot(weekday).unsqueeze(0).repeat(self.window_size, 1)  # (T_in, 7)
-
-        # OD flow values
-        flow_feature = torch.tensor(x_vals, dtype=torch.float32).unsqueeze(-1)  # (T_in, 1)
+        # Build features
+        # (T_in, 1)
+        flow_feature = x_vals.unsqueeze(-1)
 
         feat_list = [flow_feature]
+
+        # 시간 인코딩
         if self.use_time_encoding:
+            hist_minutes = np.arange(start_idx, start_idx+self.window_size) % 1440
+            time_enc_hist = build_time_sin_cos(hist_minutes)
             feat_list.append(time_enc_hist)
+
+        # 요일 원핫
         if self.use_weekday:
+            weekday_oh = weekday_onehot(weekday).unsqueeze(0).repeat(self.window_size, 1)
             feat_list.append(weekday_oh)
 
-        # final input shape = (T_in, F)
         x_feat = torch.cat(feat_list, dim=1)
+        y_feat = y_vals.unsqueeze(-1)
 
-        # output shape = (T_out, 1)
-        y_feat = torch.tensor(y_vals, dtype=torch.float32).unsqueeze(-1)
-
-        return {
-            "x": x_feat,      # (T_in, F)
-            "y": y_feat,      # (T_out, 1)
-            "weekday": weekday,
-            "start_idx": start_idx,
-        }
+        return {"x": x_feat, "y": y_feat}
 
 
 class CacheDataset(Dataset):
