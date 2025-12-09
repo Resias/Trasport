@@ -38,18 +38,38 @@ SPECIAL_MAP = {
 }
 
 import re
+
+# def normalize_station_name(name: str):
+#     if not isinstance(name, str):
+#         return "Unknown"
+
+#     name = name.strip()
+#     if name in SPECIAL_MAP:
+#         return SPECIAL_MAP[name]
+
+#     return remove_parentheses(name)
 def remove_parentheses(name: str):
+    """괄호와 그 안 내용 제거"""
     return re.sub(r"\(.*?\)", "", name).strip()
 
+# ----------------------------------------------------------
+# 🔥 3) 최종 역명 정규화 함수
+# ----------------------------------------------------------
 def normalize_station_name(name: str):
     if not isinstance(name, str):
         return "Unknown"
 
     name = name.strip()
+
+    # 1️⃣ 특수 매핑 먼저 적용
     if name in SPECIAL_MAP:
         return SPECIAL_MAP[name]
 
-    return remove_parentheses(name)
+    # 2️⃣ 특수 매핑 안 된 경우 → 괄호 제거
+    cleaned = remove_parentheses(name)
+
+    # 3️⃣ 청량리 같은 case는 위에서 처리됨
+    return cleaned
 
 
 # =====================================================
@@ -124,6 +144,8 @@ def validate_minute_od(od_path, parquet_files, station2id):
         df = pd.read_parquet(f, columns=["승차역명", "하차역명"])
         df["승차역명"] = df["승차역명"].apply(normalize_station_name)
         df["하차역명"] = df["하차역명"].apply(normalize_station_name)
+        df = df[df["승차역명"].isin(station2id)]
+        df = df[df["하차역명"].isin(station2id)]
         df = df[(df["승차역명"] != "Unknown") & (df["하차역명"] != "Unknown")]
         total_rides += len(df)
 

@@ -85,6 +85,8 @@ def compute_minute_OD(day_files, station2id):
         df = pd.read_parquet(f, columns=["승차역명", "하차역명", "승차일시"])
         df["승차역명"] = df["승차역명"].apply(normalize_station_name)
         df["하차역명"] = df["하차역명"].apply(normalize_station_name)
+        # df = df[df["승차역명"].isin(station2id)]
+        # df = df[df["하차역명"].isin(station2id)]
         
         df["승차역명"] = df["승차역명"].fillna("Unknown")
         df["하차역명"] = df["하차역명"].fillna("Unknown")
