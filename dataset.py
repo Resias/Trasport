@@ -2,6 +2,7 @@
 
 import os
 import datetime
+import argparse
 import numpy as np
 from tqdm import tqdm
 import torch
@@ -300,9 +301,6 @@ def get_dataset(data_root, train_subdir, val_subdir, window_size, hop_size, pred
     return trainset, valset
 
 if __name__ == "__main__":
-    import argparse
-    from torch.utils.data import DataLoader
-
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_root", type=str, default="./od_minute")
     parser.add_argument("--train_dir", type=str, default="train")
