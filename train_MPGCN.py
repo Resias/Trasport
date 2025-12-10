@@ -61,9 +61,9 @@ def main():
     parser.add_argument("--pred_size", type=int, default=1)    # Next step
     parser.add_argument("--hop_size", type=int, default=1)
     
-    parser.add_argument("--batch_size", type=int, default=16)
+    parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--max_epochs", type=int, default=50)
+    parser.add_argument("--max_epochs", type=int, default=100)
     
     # Model Params
     parser.add_argument("--lstm_dim", type=int, default=32)
