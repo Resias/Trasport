@@ -217,7 +217,10 @@ class ODPairDatasetV2(Dataset):
         x_feat = torch.cat(feat_list, dim=1)
         y_feat = y_vals.unsqueeze(-1)
 
-        return {"x": x_feat, "y": y_feat}
+        return {
+            "x": x_feat.float(),     # (T, F)
+            "y": y_feat.float(),     # (1, 1)
+        }
 
 
 class CacheDataset(Dataset):

@@ -2,6 +2,10 @@ import pytorch_lightning as L
 import torch
 from torch.optim import Adam
 
+def smape(y_true, y_pred, eps=1e-3):
+    denom = (torch.abs(y_true) + torch.abs(y_pred)).clamp(min=eps)
+    return 100 * torch.mean(2 * torch.abs(y_pred - y_true) / denom)
+
 class MetroLM(L.LightningModule):
     def __init__(self, model, loss, lr, mape_eps=1e-3):
         super().__init__()
@@ -30,7 +34,8 @@ class MetroLM(L.LightningModule):
         mae = torch.mean(torch.abs(y_true - y_pred))
         denom = torch.clamp(torch.abs(y_true), min=self.mape_eps)
         mape = torch.mean(torch.abs((y_true - y_pred) / denom)) * 100.0
-        return mse, mae, mape
+        smape_ = smape(y_true, y_pred, eps=self.mape_eps)
+        return mse, mae, mape, smape_
 
     def training_step(self, batch, batch_idx):
         y_pred, y_tensor, batch_size = self.forward_batch(batch)
@@ -47,7 +52,7 @@ class MetroLM(L.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         y_pred, y_tensor, batch_size = self.forward_batch(batch)
-        mse, mae, mape = self._compute_metrics(y_tensor, y_pred)
+        mse, mae, mape, smape_ = self._compute_metrics(y_tensor, y_pred)
         self.log(
             "val_mse",
             mse,
@@ -67,6 +72,14 @@ class MetroLM(L.LightningModule):
         self.log(
             "val_mape",
             mape,
+            prog_bar=False,
+            on_step=False,
+            on_epoch=True,
+            batch_size=batch_size,
+        )
+        self.log(
+            "val_smape",
+            smape_,
             prog_bar=False,
             on_step=False,
             on_epoch=True,
@@ -98,7 +111,8 @@ class TCNMetroLM(L.LightningModule):
         mae = torch.mean(torch.abs(y_true - y_pred))
         denom = torch.clamp(torch.abs(y_true), min=self.mape_eps)
         mape = torch.mean(torch.abs((y_true - y_pred) / denom)) * 100.0
-        return mse, mae, mape
+        smape_ = smape(y_true, y_pred, eps=self.mape_eps)
+        return mse, mae, mape, smape_
 
     def training_step(self, batch, batch_idx):
         y_pred, y_true, batch_size = self.forward_batch(batch)
@@ -112,11 +126,12 @@ class TCNMetroLM(L.LightningModule):
         y_pred, y_true, batch_size = self.forward_batch(batch)
         y_last = y_true[:, -1, :]
 
-        mse, mae, mape = self._compute_metrics(y_last, y_pred)
+        mse, mae, mape, smape_ = self._compute_metrics(y_last, y_pred)
 
         self.log("val_mse", mse, batch_size=batch_size, on_epoch=True)
         self.log("val_mae", mae, batch_size=batch_size, on_epoch=True)
         self.log("val_mape", mape, batch_size=batch_size, on_epoch=True)
+        self.log("val_smape", smape_, batch_size=batch_size, on_epoch=True)
 
         return mse
 
