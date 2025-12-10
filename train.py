@@ -24,7 +24,7 @@ def resolve_accelerator():
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train Metro GNN forecaster")
-    parser.add_argument("--data_root", default="/home/data/od_minute", help="root directory with train/val data")
+    parser.add_argument("--data_root", default="/workspace/od_minute", help="root directory with train/val data")
     parser.add_argument("--train_subdir", default="train", help="subdirectory name for training set")
     parser.add_argument("--val_subdir", default="test", help="subdirectory name for validation set")
     parser.add_argument("--od_csv", default="./AD_matrix_trimmed_common.csv", help="path to adjacency csv")

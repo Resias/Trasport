@@ -26,7 +26,7 @@ def resolve_accelerator():
 def parse_args():
     parser = argparse.ArgumentParser(description="Train TCN model with Metro pipeline")
 
-    parser.add_argument("--data_root", default="/home/data/od_minute")
+    parser.add_argument("--data_root", default="/workspace/od_minute")
     parser.add_argument("--train_subdir", default="train")
     parser.add_argument("--val_subdir", default="test")
 
@@ -37,11 +37,11 @@ def parse_args():
     parser.add_argument("--od_i", type=int, default=10)
     parser.add_argument("--od_j", type=int, default=20)
 
-    parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--num_workers", type=int, default=1)
 
     parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--max_epochs", type=int, default=50)
+    parser.add_argument("--max_epochs", type=int, default=100)
 
     parser.add_argument("--wandb_project", default="metro-tcn")
     parser.add_argument("--wandb_log_model", action="store_true")

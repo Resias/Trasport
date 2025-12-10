@@ -163,7 +163,7 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     print("\n=== Loading Datasets ===")
-    tcn_dataset, _ = get_odpair_dataset(
+    _, tcn_dataset  = get_odpair_dataset(
         data_root=args.data_root,
         train_subdir=args.test_subdir,
         val_subdir=args.test_subdir,
@@ -174,7 +174,7 @@ def main():
         od_j=args.od_j
     )
 
-    gnn_dataset, _ = get_dataset(
+    _, gnn_dataset = get_dataset(
         data_root=args.data_root,
         train_subdir=args.test_subdir,
         val_subdir=args.test_subdir,
