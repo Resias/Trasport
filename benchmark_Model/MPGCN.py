@@ -241,7 +241,7 @@ class MPGCN(nn.Module):
 if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     N = 20
-    B = 4
+    B = 32
     T = 5  # Paper uses 5 historical points [cite: 1351]
     
     # 1. Initialize Model

@@ -190,12 +190,13 @@ class STLSTMLM(L.LightningModule):
 # MPGCN Trainer
 # ==========================================
 class MPGCNLM(L.LightningModule):
-    def __init__(self, model, loss, lr=1e-3, pred_size=1):
+    def __init__(self, model, loss, lr=1e-3, pred_size=1, mape_eps=1e-3):
         super().__init__()
         self.model = model
         self.loss_fn = loss
         self.lr = lr
         self.pred_size = pred_size
+        self.mape_eps = mape_eps
         
     def construct_dynamic_graph(self, x):
         """
