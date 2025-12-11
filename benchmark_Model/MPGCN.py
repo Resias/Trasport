@@ -151,8 +151,9 @@ class MPGCNBackbone(nn.Module):
         
         # Temporal Feature Extraction
         # Input dim is 1 (Scalar OD flow)
-        self.lstm = nn.LSTM(input_size=1, hidden_size=lstm_h, batch_first=True)
-        
+        # self.lstm = nn.LSTM(input_size=1, hidden_size=lstm_h, batch_first=True)
+        self.lstm = nn.LSTM(input_size=N*N, hidden_size=lstm_h, batch_first=True)
+
         # Spatial Layers
         self.gcn_layers = nn.ModuleList()
         in_dim = lstm_h
@@ -167,15 +168,21 @@ class MPGCNBackbone(nn.Module):
     def forward(self, X, cheb_L1, cheb_L2):
         B, T, N, _ = X.shape
         
-        # [Step 1] LSTM
-        # (B, T, N, N) -> (B, N, N, T) -> (B*N*N, T, 1)
-        X_seq = X.permute(0, 2, 3, 1).contiguous().view(B * N * N, T, 1)
-        
-        _, (h_n, _) = self.lstm(X_seq)
-        
-        # h_n[-1]: (B*N*N, lstm_h) -> (B, N, N, lstm_h)
-        H = h_n[-1].view(B, N, N, -1)
-        
+        # # [Step 1] LSTM
+        # # (B, T, N, N) -> (B, N, N, T) -> (B*N*N, T, 1)
+        # X_seq = X.permute(0, 2, 3, 1).contiguous().view(B * N * N, T, 1)
+        # _, (h_n, _) = self.lstm(X_seq)
+        # # h_n[-1]: (B*N*N, lstm_h) -> (B, N, N, lstm_h)
+        # H = h_n[-1].view(B, N, N, -1)
+        # (B, T, N*N)
+        X_seq = X.reshape(B, T, N * N)
+
+        # LSTM 입력 차원 변경
+        _, (h_n, _) = self.lstm(X_seq)   # h_n[-1]: (B, lstm_h)
+
+        # 동일한 크기의 OD 히트맵 형태로 확장
+        H = h_n[-1].unsqueeze(1).unsqueeze(1).repeat(1, N, N, 1)
+
         # [Step 2] 2D-GCN
         for gcn in self.gcn_layers:
             H = gcn(H, cheb_L1, cheb_L2)
@@ -200,38 +207,45 @@ class MPGCN(nn.Module):
         self.cheb_adj_O = None; self.cheb_adj_D = None
         self.cheb_poi_O = None; self.cheb_poi_D = None
 
+    # ------------ STATIC GRAPH SETUP (DEVICE-SAFE) -------------
     def set_static_graphs(self, adj_O, adj_D, poi_O, poi_D):
-        with torch.no_grad():
-            self.cheb_adj_O = get_chebyshev_polynomials(build_normalized_laplacian(adj_O), self.K)
-            self.cheb_adj_D = get_chebyshev_polynomials(build_normalized_laplacian(adj_D), self.K)
-            self.cheb_poi_O = get_chebyshev_polynomials(build_normalized_laplacian(poi_O), self.K)
-            self.cheb_poi_D = get_chebyshev_polynomials(build_normalized_laplacian(poi_D), self.K)
+        device = adj_O.device
 
+        L_adj_O = build_normalized_laplacian(adj_O).to(device)
+        L_adj_D = build_normalized_laplacian(adj_D).to(device)
+        L_poi_O = build_normalized_laplacian(poi_O).to(device)
+        L_poi_D = build_normalized_laplacian(poi_D).to(device)
+
+        self.cheb_adj_O = [t.to(device) for t in get_chebyshev_polynomials(L_adj_O, self.K)]
+        self.cheb_adj_D = [t.to(device) for t in get_chebyshev_polynomials(L_adj_D, self.K)]
+        self.cheb_poi_O = [t.to(device) for t in get_chebyshev_polynomials(L_poi_O, self.K)]
+        self.cheb_poi_D = [t.to(device) for t in get_chebyshev_polynomials(L_poi_D, self.K)]
+
+    # ------------------ FORWARD (DEVICE-SAFE) --------------------
     def forward(self, X, dynamic_adj_O=None, dynamic_adj_D=None):
-        """
-        dynamic_adj_O/D: (B, N, N) Batch-wise Adjacency Matrices
-        """
-        if self.cheb_adj_O is None:
-            raise RuntimeError("Please call set_static_graphs() first.")
-            
-        # 1. Static Views
+        device = X.device
+
+        # Static graph tensors → force to device
+        self.cheb_adj_O = [t.to(device) for t in self.cheb_adj_O]
+        self.cheb_adj_D = [t.to(device) for t in self.cheb_adj_D]
+        self.cheb_poi_O = [t.to(device) for t in self.cheb_poi_O]
+        self.cheb_poi_D = [t.to(device) for t in self.cheb_poi_D]
+
         pred_adj = self.model_adj(X, self.cheb_adj_O, self.cheb_adj_D)
         pred_poi = self.model_poi(X, self.cheb_poi_O, self.cheb_poi_D)
-        
-        # 2. Dynamic View
-        if dynamic_adj_O is not None and dynamic_adj_D is not None:
-            # Dynamic: (B, N, N) -> Laplacian (B, N, N) -> Chebyshev [(B, N, N), ...]
-            L_dyn_O = build_normalized_laplacian(dynamic_adj_O)
-            L_dyn_D = build_normalized_laplacian(dynamic_adj_D)
-            
-            cheb_dyn_O = get_chebyshev_polynomials(L_dyn_O, self.K)
-            cheb_dyn_D = get_chebyshev_polynomials(L_dyn_D, self.K)
-            
+
+        # Dynamic graph 처리
+        if dynamic_adj_O is not None:
+            L_dyn_O = build_normalized_laplacian(dynamic_adj_O).to(device)
+            L_dyn_D = build_normalized_laplacian(dynamic_adj_D).to(device)
+
+            cheb_dyn_O = [t.to(device) for t in get_chebyshev_polynomials(L_dyn_O, self.K)]
+            cheb_dyn_D = [t.to(device) for t in get_chebyshev_polynomials(L_dyn_D, self.K)]
+
             pred_dyn = self.model_dyn(X, cheb_dyn_O, cheb_dyn_D)
         else:
-            pred_dyn = torch.zeros_like(pred_adj) 
+            pred_dyn = torch.zeros_like(pred_adj)
 
-        # 3. Ensemble
         final_pred = (pred_adj + pred_poi + pred_dyn) / 3.0
         return final_pred
 
