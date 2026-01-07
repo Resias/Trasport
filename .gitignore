@@ -3,3 +3,9 @@ wandb/
 metro-tcn/
 metro-st-gcn/
 metro-st-lstm/
+inference_results_time_ordered/
+analysis_results/
+daily_compare/
+inference_results_no_mix/
+metro-gnn/
+metro-mpgcn/
