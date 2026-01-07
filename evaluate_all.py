@@ -6,10 +6,12 @@ import pandas as pd
 from torch.utils.data import DataLoader
 import argparse
 
-from dataset import get_dataset, get_odpair_dataset
+from train_MPGCN import load_static_graphs
+from dataset import get_dataset, get_odpair_dataset, get_mpgcn_dataset, get_st_lstm_dataset
 from benchmark_Model.TCNbased import TCN_Attention_LSTM
 from benchmark_Model.ST_LSTM import STLSTM
-from trainer import TCNMetroLM, MetroLM
+from benchmark_Model.MPGCN import MPGCN
+from trainer import TCNMetroLM, MetroLM, STLSTMLM, MPGCNLM
 from GNN import MetroGNNForecaster
 
 
@@ -17,6 +19,10 @@ from GNN import MetroGNNForecaster
 # 🔍 1. Metric 계산 함수
 # ===========================================================
 def compute_metrics(y_true, y_pred):
+    """
+    y_true, y_pred: numpy array, shape (N, 1) or (N,)
+    반환: MSE, RMSE, MAE, MAPE, SMAPE
+    """
     y_true = y_true.reshape(-1)
     y_pred = y_pred.reshape(-1)
 
@@ -46,11 +52,11 @@ def evaluate_tcn(ckpt_path, dataset, batch_size, num_workers, device):
 
     # 모델 정의 (Lightning checkpoint 로딩)
     print(f"[TCN] Loading checkpoint: {ckpt_path}")
-    model_module: TCNMetroLM = TCNMetroLM.load_from_checkpoint(
+    lm: TCNMetroLM = TCNMetroLM.load_from_checkpoint(
         ckpt_path,
         map_location=device,
         model=TCN_Attention_LSTM(
-            input_dim=input_dim,
+            input_dim=10,
             lstm_hidden=128,
             lstm_layers=3
         ),
@@ -58,8 +64,9 @@ def evaluate_tcn(ckpt_path, dataset, batch_size, num_workers, device):
         lr=1e-3
     )
 
-    model_module.to(device)
-    model_module.eval()
+    # 실제 예측에 사용할 순수 모델
+    model = lm.model.to(device)
+    model.eval()
 
     preds, trues = [], []
 
@@ -68,7 +75,7 @@ def evaluate_tcn(ckpt_path, dataset, batch_size, num_workers, device):
             x = batch["x"].to(device)
             y = batch["y"][:, -1, :].to(device)
 
-            pred, _ = model_module.model(x)
+            pred, _ = model(x)
 
             preds.append(pred.cpu())
             trues.append(y.cpu())
@@ -94,15 +101,15 @@ def evaluate_gnn(ckpt_path, dataset, batch_size, num_workers, device, od_i, od_j
     od_df = od_df.apply(pd.to_numeric, errors="coerce").fillna(0)
 
     print(f"[GNN] Loading checkpoint: {ckpt_path}")
-    model_module: MetroLM = MetroLM.load_from_checkpoint(
+    lm: MetroLM = MetroLM.load_from_checkpoint(
         ckpt_path,
         map_location=device,
         model=MetroGNNForecaster(
             od_df=od_df,
             in_feat=in_feat,
-            gnn_hidden=64,
-            rnn_hidden=64,
-            weekday_emb_dim=8,
+            gnn_hidden=32,
+            rnn_hidden=32,
+            weekday_emb_dim=16,
             time_emb_dim=time_emb_dim,
             window_size=sample["x_tensor"].shape[0],
             pred_size=sample["y_tensor"].shape[0],
@@ -112,8 +119,8 @@ def evaluate_gnn(ckpt_path, dataset, batch_size, num_workers, device, od_i, od_j
         lr=1e-3
     )
 
-    model_module.to(device)
-    model_module.eval()
+    model = lm.model.to(device)
+    model.eval()
 
     preds, trues = [], []
 
@@ -124,7 +131,7 @@ def evaluate_gnn(ckpt_path, dataset, batch_size, num_workers, device, od_i, od_j
             time_hist = batch["time_enc_hist"].to(device)
             time_fut = batch["time_enc_fut"].to(device)
 
-            pred_full = model_module.model(x, weekday, time_hist, time_fut)   # (B, T_out, N, N)
+            pred_full = model(x, weekday, time_hist, time_fut)   # (B, T_out, N, N)
             true_full = batch["y_tensor"].to(device)
 
             pred = pred_full[:, -1, od_i, od_j]
@@ -147,16 +154,24 @@ def evaluate_stlstm(ckpt_path, dataset, batch_size, num_workers, device):
     sample = dataset[0]
     input_dim = sample["x"].shape[-1]
     pred_size = sample["y"].shape[0]
+    loss = torch.nn.MSELoss()
+
 
     print(f"[ST-LSTM] Loading checkpoint: {ckpt_path}")
-    model: STLSTM = STLSTM(
+    model_struct = STLSTM(
         input_dim=input_dim,
         hidden_dim=64,
         num_layers=2,
-        output_dim=pred_size
+        output_dim=30
     )
-    model.load_state_dict(torch.load(ckpt_path, map_location=device))
-    model.to(device)
+    # LightningModule(STLSTMLM) 기준으로 ckpt가 저장되었다고 가정
+    lm: STLSTMLM = STLSTMLM.load_from_checkpoint(
+        ckpt_path,
+        model = model_struct,
+        map_location=device,
+        loss = loss
+    )
+    model = lm.model.to(device)
     model.eval()
 
     preds, trues = [], []
@@ -176,14 +191,74 @@ def evaluate_stlstm(ckpt_path, dataset, batch_size, num_workers, device):
 
 
 # ===========================================================
-# 🔹 5. Main Compare Function
+# 5. MPGCN Evaluate (★신규 추가★)
+# ===========================================================
+def evaluate_mpgcn(ckpt, dataset, batch, workers, device, od_i, od_j):
+    loader = DataLoader(dataset, batch_size=batch, shuffle=False, num_workers=workers)
+
+    sample = dataset[0]
+    N = sample["x"].shape[1]   # (T,N,N)
+
+    # 2. Model Init
+    model_struct = MPGCN(
+        N=N, 
+        lstm_h=32, 
+        gcn_h=32, 
+        gcn_out=16, 
+        K=3
+    )
+    
+    # 3. Load & Set Static Graphs
+    print("Setting up Static Graphs...")
+    adj_O, adj_D, poi_O, poi_D = load_static_graphs("/workspace/od_minute", N)
+    
+    # Move graphs to device will be handled by Lightning or manually if needed?
+    # Actually, model buffers need to be on same device. 
+    # Lightning handles submodule parameters but we pass tensors to `set_static_graphs`.
+    # We should do this inside `on_fit_start` or pass CPU tensors and let model register them as buffers.
+    # Here, for simplicity, we pass them directly. Model will calculate polys and store.
+    model_struct.set_static_graphs(adj_O, adj_D, poi_O, poi_D)
+    
+    lm: MPGCNLM = MPGCNLM.load_from_checkpoint(
+        ckpt,
+        map_location=device,
+        model=model_struct,
+        loss=torch.nn.MSELoss(),
+        lr=1e-3,
+        pred_size=1
+    )
+
+    model = lm.model.to(device)
+    model.eval()
+
+    preds, trues = [], []
+
+    with torch.no_grad():
+        for batch in loader:
+            x = batch["x"].to(device)       # (B, T, N, N)
+            y = batch["y"].to(device)       # (B, 1, N, N)
+
+            pred_full = model(x)            # (B, N, N)
+
+            pred = pred_full[:, od_i, od_j].unsqueeze(-1)
+            true = y[:, -1, od_i, od_j].unsqueeze(-1)
+
+            preds.append(pred.cpu())
+            trues.append(true.cpu())
+
+    return torch.cat(preds).numpy(), torch.cat(trues).numpy()
+
+
+# ===========================================================
+# 5. Main Compare Function
 # ===========================================================
 def parse_args():
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("--tcn_ckpt", required=True)
-    parser.add_argument("--gnn_ckpt", required=True)
-    parser.add_argument("--stlstm_ckpt", required=True)
+    parser.add_argument("--tcn_ckpt", default="/root/tmp/Trasport/metro-tcn/kqy0m396/checkpoints/epoch=499-step=404000.ckpt")
+    parser.add_argument("--gnn_ckpt", default="/root/tmp/Trasport/metro-gnn/u7nf82rf/checkpoints/epoch=299-step=91800.ckpt")
+    parser.add_argument("--stlstm_ckpt", default="/root/tmp/Trasport/metro-st-lstm/fn4yc8g8/checkpoints/epoch=499-step=4500.ckpt")
+    parser.add_argument("--mpgcn_ckpt", default="/root/tmp/Trasport/metro-mpgcn/c9st2s73/checkpoints/epoch=2-step=39708.ckpt")
 
     parser.add_argument("--data_root", default="/home/data/od_minute")
     parser.add_argument("--test_subdir", default="test")
@@ -196,21 +271,18 @@ def parse_args():
     parser.add_argument("--od_i", type=int, default=10)
     parser.add_argument("--od_j", type=int, default=20)
 
-    parser.add_argument("--batch_size", type=int, default=32)
+    parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--num_workers", type=int, default=1)
 
     return parser.parse_args()
-
 
 
 def main():
     args = parse_args()
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    print("\n=== Loading Datasets ===")
-
-    # STLSTM & TCN dataset
-    _, odpair_dataset = get_odpair_dataset(
+    print("\n=== Loading OD Pair Dataset for TCN ===")
+    _, tcn_dataset = get_odpair_dataset(
         data_root=args.data_root,
         train_subdir=args.test_subdir,
         val_subdir=args.test_subdir,
@@ -221,85 +293,91 @@ def main():
         od_j=args.od_j
     )
 
-    # GNN dataset
+    print("\n=== Loading GNN Dataset ===")
     _, gnn_dataset = get_dataset(
         data_root=args.data_root,
         train_subdir=args.test_subdir,
         val_subdir=args.test_subdir,
-        window_size=60,
-        hop_size=10,
-        pred_size=30
+        window_size=args.window_size,
+        hop_size=args.hop_size,
+        pred_size=args.pred_size
     )
 
-    print("Evaluating models...")
-
-    # ------------------------------
-    # TCN
-    # ------------------------------
-    tcn_pred, tcn_true = evaluate_tcn(
-        args.tcn_ckpt,
-        odpair_dataset,
-        args.batch_size,
-        args.num_workers,
-        device
+    dist_matrix = np.load("dist_matrix.npy")
+    W_matrix = np.load("W_matrix.npy")    
+    print("\n=== Loading ST-LSTM Dataset ===")
+    _, odpair_dataset = get_st_lstm_dataset(
+        data_root=args.data_root,
+        train_subdir=args.test_subdir,
+        val_subdir=args.test_subdir,
+        window_size=args.window_size,
+        hop_size=args.hop_size,
+        pred_size=1,  # train과 동일
+        target_s=10,
+        target_e=20,
+        top_k=3,
+        dist_matrix=dist_matrix,
+        W_matrix=W_matrix,
     )
 
-    # ------------------------------
-    # STLSTM
-    # ------------------------------
-    st_pred, st_true = evaluate_stlstm(
-        args.stlstm_ckpt,
-        odpair_dataset,
-        args.batch_size,
-        args.num_workers,
-        device
+    # MPGCN dataset 추가 로딩
+    print("\n=== Loading MPGCN Dataset ===")
+    _, mpgcn_dataset = get_mpgcn_dataset(
+        data_root=args.data_root,
+        train_subdir=args.test_subdir,
+        val_subdir=args.test_subdir,
+        window_size=args.window_size,
+        hop_size=args.hop_size,
+        pred_size=args.pred_size
     )
 
-    # ------------------------------
-    # GNN
-    # ------------------------------
-    gnn_pred, gnn_true = evaluate_gnn(
-        args.gnn_ckpt,
-        gnn_dataset,
-        args.batch_size,
-        args.num_workers,
-        device,
-        args.od_i,
-        args.od_j,
-        args.od_csv
-    )
+    results = {}
 
     # ------------------------------
-    # Metrics 계산
+    # Evaluate TCN
     # ------------------------------
-    tcn_metrics = compute_metrics(tcn_true, tcn_pred)
-    st_metrics  = compute_metrics(st_true, st_pred)
-    gnn_metrics = compute_metrics(gnn_true, gnn_pred)
+    if args.tcn_ckpt:
+        pred, true = evaluate_tcn(args.tcn_ckpt, tcn_dataset, args.batch_size, args.num_workers, device)
+        results["TCN"] = compute_metrics(true, pred)
 
     # ------------------------------
-    # 결과 출력
+    # Evaluate STLSTM
     # ------------------------------
-    names = ["MSE", "RMSE", "MAE", "MAPE", "SMAPE", "R²"]
+    if args.stlstm_ckpt:
+        pred, true = evaluate_stlstm(args.stlstm_ckpt, odpair_dataset, args.batch_size, args.num_workers, device)
+        results["STLSTM"] = compute_metrics(true, pred)
 
-    print("\n========================================")
-    print("        🔥 MODEL PERFORMANCE COMPARE 🔥")
-    print("========================================")
-    print(f"Target OD Pair = ({args.od_i}, {args.od_j})\n")
+    # ------------------------------
+    # Evaluate GNN
+    # ------------------------------
+    if args.gnn_ckpt:
+        pred, true = evaluate_gnn(args.gnn_ckpt, gnn_dataset, args.batch_size, args.num_workers,
+                                  device, args.od_i, args.od_j, args.od_csv)
+        results["GNN"] = compute_metrics(true, pred)
 
-    def print_table_row(title, values):
-        print(f"📌 {title}")
-        for n, v in zip(names, values):
-            if n == "R²":
-                print(f" {n:<6}: {v:.4f}")
-            else:
-                print(f" {n:<6}: {v:.4f}")
-        print("")
+    # ------------------------------
+    # ★ Evaluate MPGCN
+    # ------------------------------
+    if args.mpgcn_ckpt:
+        pred, true = evaluate_mpgcn(args.mpgcn_ckpt, mpgcn_dataset, args.batch_size, args.num_workers,
+                                    device, args.od_i, args.od_j)
+        results["MPGCN"] = compute_metrics(true, pred)
 
-    print_table_row("TCN Results", tcn_metrics)
-    print_table_row("ST-LSTM Results", st_metrics)
-    print_table_row("GNN Results", gnn_metrics)
+    # -----------------------------------------------------
+    # Print Results
+    # -----------------------------------------------------
+    print("\n=================================================")
+    print("        MODEL PERFORMANCE COMPARISON")
+    print("=================================================")
 
-    print("========================================")
+    metrics_name = ["MSE", "RMSE", "MAE", "MAPE", "SMAPE"]
+
+    for model_name, metric in results.items():
+        print(f"\n📌 {model_name}")
+        for n, v in zip(metrics_name, metric):
+            print(f" {n:<6}: {v:.4f}")
+
+    print("\n=================================================")
 
 
 if __name__ == "__main__":
