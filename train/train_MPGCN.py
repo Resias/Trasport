@@ -9,7 +9,7 @@ from pytorch_lightning.loggers import WandbLogger
 
 from dataset import get_mpgcn_dataset
 from benchmark_Model.MPGCN import MPGCN  # 사용자가 작성한 모델 파일명에 맞게 수정
-from trainer import MPGCNLM
+from train.trainer import MPGCNLM
 
 torch.backends.cudnn.enabled = True
 torch.backends.cudnn.benchmark = True

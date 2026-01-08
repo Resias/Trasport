@@ -280,3 +280,54 @@ class MPGCNLM(L.LightningModule):
 
     def configure_optimizers(self):
         return Adam(self.parameters(), lr=self.lr)
+
+class MetroGraphLM(L.LightningModule):
+    def __init__(self, model, loss, lr):
+        super().__init__()
+        self.model = model
+        self.loss_fn = loss
+        self.lr = lr
+
+    def forward_batch(self, batch):
+        graph = batch["graph"]
+        B = batch["B"]
+        T = batch["T"]
+        y_true = batch["y"]  # (B, K, N, N)
+
+        y_pred = self.model(
+            adjency_edge_index=self.model.edge_index,
+            batch_graph=graph,
+            B=B,
+            T=T
+        )
+        return y_pred, y_true, B
+
+    def training_step(self, batch, batch_idx):
+        y_pred, y_true, B = self.forward_batch(batch)
+        loss = self.loss_fn(y_pred, y_true)
+
+        self.log(
+            "train_loss",
+            loss,
+            prog_bar=True,
+            on_step=True,
+            on_epoch=True,
+            batch_size=B,
+        )
+        return loss
+
+    def validation_step(self, batch, batch_idx):
+        y_pred, y_true, B = self.forward_batch(batch)
+        loss = self.loss_fn(y_pred, y_true)
+
+        self.log(
+            "val_loss",
+            loss,
+            prog_bar=True,
+            on_epoch=True,
+            batch_size=B,
+        )
+        return loss
+
+    def configure_optimizers(self):
+        return Adam(self.parameters(), lr=self.lr)

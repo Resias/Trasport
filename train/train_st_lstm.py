@@ -10,7 +10,7 @@ from pytorch_lightning.loggers import WandbLogger
 
 from dataset import get_st_lstm_dataset
 from benchmark_Model.ST_LSTM import STLSTM
-from trainer import STLSTMLM
+from train.trainer import STLSTMLM
 
 torch.backends.cudnn.enabled = True
 torch.backends.cudnn.benchmark = True
