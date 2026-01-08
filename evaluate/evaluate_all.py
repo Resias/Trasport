@@ -6,13 +6,13 @@ import pandas as pd
 from torch.utils.data import DataLoader
 import argparse
 
-from train_MPGCN import load_static_graphs
+from train.train_MPGCN import load_static_graphs
 from dataset import get_dataset, get_odpair_dataset, get_mpgcn_dataset, get_st_lstm_dataset
 from benchmark_Model.TCNbased import TCN_Attention_LSTM
 from benchmark_Model.ST_LSTM import STLSTM
 from benchmark_Model.MPGCN import MPGCN
-from trainer import TCNMetroLM, MetroLM, STLSTMLM, MPGCNLM
-from GNN import MetroGNNForecaster
+from train.trainer import TCNMetroLM, MetroLM, STLSTMLM, MPGCNLM
+from models.GNN import MetroGNNForecaster
 
 
 # ===========================================================

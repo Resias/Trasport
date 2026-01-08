@@ -9,7 +9,7 @@ from pytorch_lightning.loggers import WandbLogger
 
 from dataset import get_odpair_dataset
 from benchmark_Model.TCNbased import TCN_Attention_LSTM
-from trainer import TCNMetroLM
+from train.trainer import TCNMetroLM
 
 torch.backends.cudnn.enabled = True
 torch.backends.cudnn.benchmark = True

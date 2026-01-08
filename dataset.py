@@ -7,6 +7,50 @@ import numpy as np
 from tqdm import tqdm
 import torch
 from torch.utils.data import Dataset, DataLoader
+from torch_geometric.data import Data, Batch
+from torch_geometric.utils import dense_to_sparse
+
+def graph_collate_fn(batch, edge_index):
+    """
+    batch: list of dict
+        batch[i]["x_tensor"]: (T, N, N)
+        batch[i]["y_tensor"]: (K, N, N)
+    """
+
+    data_list = []
+    B = len(batch)
+    T = batch[0]["x_tensor"].shape[0]
+    N = batch[0]["x_tensor"].shape[1]
+
+    for b in range(B):
+        x_seq = batch[b]["x_tensor"]  # (T, N, N)
+
+        for t in range(T):
+            od_t = x_seq[t]  # (N, N)
+
+            # edge_attr from OD
+            _, edge_attr = dense_to_sparse(od_t)
+            edge_attr = edge_attr.unsqueeze(-1)
+
+            # node feature (dummy, embedding은 모델에서)
+            x_node = torch.zeros(N, 1)
+
+            data_list.append(
+                Data(
+                    x=x_node,
+                    edge_index=edge_index,
+                    edge_attr=edge_attr
+                )
+            )
+
+    batch_graph = Batch.from_data_list(data_list)
+
+    return {
+        "graph": batch_graph,
+        "B": B,
+        "T": T,
+        "y": torch.stack([b["y_tensor"] for b in batch])  # (B, K, N, N)
+    }
 
 
 def build_time_sin_cos(minute_indices, period=1440):

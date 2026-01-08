@@ -8,8 +8,8 @@ from collections import defaultdict
 from torch.utils.data import DataLoader
 
 from dataset import get_dataset
-from GNN import MetroGNNForecaster
-from trainer import MetroLM
+from models.GNN import MetroGNNForecaster
+from train.trainer import MetroLM
 
 # 추론결과 저장되는것은 각 일자별 06:30 ~ 11:29분까지의 OD 행렬(390~1409까지)
 

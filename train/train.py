@@ -1,6 +1,6 @@
 from dataset import get_dataset
-from GNN import MetroGNNForecaster
-from trainer import MetroLM
+from models.GNN import MetroGNNForecaster
+from train.trainer import MetroLM
 
 import argparse
 import os
