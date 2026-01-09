@@ -7,6 +7,9 @@ from torch.utils.data import DataLoader
 import pytorch_lightning as L
 from pytorch_lightning.loggers import WandbLogger
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
 from dataset import get_dataset
 from models.GNN import MetroGNNForecaster
 from trainer import MetroGraphLM
