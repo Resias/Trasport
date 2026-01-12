@@ -1,5 +1,6 @@
 # train/train_graph.py
 import argparse
+import datetime
 import torch
 import pandas as pd
 from torch.utils.data import DataLoader
@@ -29,7 +30,8 @@ def main():
     parser.add_argument("--pred_size", type=int, default=30)
     parser.add_argument("--hop_size", type=int, default=10)
     parser.add_argument("--batch_size", type=int, default=8)
-    parser.add_argument("--use_weekday", type=bool, default=False)
+    parser.add_argument("--use_weekday", action="store_true")
+    parser.add_argument("--use_ddp", action="store_true", help="Enable Distributed Data Parallel training")
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--max_epochs", type=int, default=200)
@@ -65,6 +67,7 @@ def main():
             batch_size=args.batch_size,
             shuffle=True,
             num_workers=args.num_workers,
+            persistent_workers=True,
             collate_fn=lambda batch: graph_collate_fn(batch, static_edge_index),
             pin_memory=True,
         )
@@ -73,6 +76,7 @@ def main():
             valset,
             batch_size=args.batch_size,
             shuffle=False,
+            persistent_workers=True,
             num_workers=args.num_workers,
             collate_fn=lambda batch: graph_collate_fn(batch, static_edge_index),
             pin_memory=True,
@@ -89,21 +93,13 @@ def main():
         )
 
         model.static_edge_index = static_edge_index
-
-        # =====================
-        # Lightning Module
-        # =====================
-        lm = MetroGraphLM(
-            model=model,
-            loss=torch.nn.MSELoss(),
-            lr=args.lr
-        )
     else:
         train_loader = DataLoader(
             trainset,
             batch_size=args.batch_size,
             shuffle=True,
             num_workers=args.num_workers,
+            persistent_workers=True,
             collate_fn=lambda batch: graph_week_collate_fn(batch, static_edge_index),
             pin_memory=True,
         )
@@ -111,6 +107,7 @@ def main():
             valset,
             batch_size=args.batch_size,
             shuffle=False,
+            persistent_workers=True,
             num_workers=args.num_workers,
             collate_fn=lambda batch: graph_week_collate_fn(batch, static_edge_index),
             pin_memory=True,
@@ -124,24 +121,44 @@ def main():
 
         model.static_edge_index = static_edge_index
 
-        # =====================
-        # Lightning Module
-        # =====================
-        lm = MetroGraphWeekLM(
-            model=model,
-            loss=torch.nn.MSELoss(),
-            lr=args.lr
-        )
+    # =====================
+    # Lightning Module
+    # =====================
+    lm = MetroGraphWeekLM(
+        model=model,
+        loss=torch.nn.MSELoss(),
+        lr=args.lr
+    )
 
     # =====================
     # Trainer
     # =====================
-    logger = WandbLogger(project=args.wandb_project)
+    accelerator = resolve_accelerator()
+
+    # 기본 strategy
+    strategy = None
+    devices = 1
+    
+    if args.use_ddp:
+        # DDP 설정
+        strategy = "ddp_find_unused_parameters_true"
+        if accelerator == "cuda":
+            # GPU 여러 개일 때
+            devices = torch.cuda.device_count()
+        else:
+            # CPU DDP
+            devices = os.cpu_count()
+    model_type = "GATTransformerODWeek" if args.use_weekday else "GATTransformerOD"
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_name = f"{model_type}_wd{args.use_weekday}_bs{args.batch_size}_T{args.window_size}_P{args.pred_size}_{timestamp}"
+
+    logger = WandbLogger(project=args.wandb_project, name=run_name)
 
     trainer = L.Trainer(
         max_epochs=args.max_epochs,
-        accelerator=resolve_accelerator(),
-        devices=1,
+        accelerator=accelerator,
+        devices=devices,
+        strategy=strategy,
         logger=logger,
         log_every_n_steps=50,
     )
