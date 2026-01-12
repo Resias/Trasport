@@ -247,8 +247,9 @@ class MetroDataset(Dataset):
         print("Caching OD matrices into memory...")
         self.day_data_cache = []
         for path in tqdm(self.data_paths):
-            arr = np.load(path)  # shape: [1440, N, N]
-            self.day_data_cache.append(torch.tensor(arr, dtype=torch.float32))
+            arr = np.load(path, mmap_mode='r')  # shape: [1440, N, N]
+            # self.day_data_cache.append(torch.tensor(arr, dtype=torch.float32))
+            self.day_data_cache.append(arr)
         print("Caching completed.")
         
         # ---- 3) sliding window 정보 생성 ----
@@ -279,9 +280,11 @@ class MetroDataset(Dataset):
         day_data = self.day_data_cache[file_idx]  # (1440, N, N)
         
         # slicing
-        x_tensor = day_data[start_idx:start_idx+self.window_size]  
-        y_tensor = day_data[start_idx+self.window_size:
-                            start_idx+self.window_size+self.pred_size]
+        x_numpy = day_data[start_idx:start_idx+self.window_size].copy()
+        y_numpy = day_data[start_idx+self.window_size:
+                            start_idx+self.window_size+self.pred_size].copy()
+        x_tensor = torch.from_numpy(x_numpy).float()
+        y_tensor = torch.from_numpy(y_numpy).float()
 
         # time encoding
         hist_minutes = torch.arange(start_idx, start_idx+self.window_size) % 1440
