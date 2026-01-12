@@ -10,13 +10,8 @@ from torch.utils.data import Dataset, DataLoader
 from torch_geometric.data import Data, Batch
 from torch_geometric.utils import dense_to_sparse
 
-def graph_collate_fn(batch, edge_index):
-    """
-    batch: list of dict
-        batch[i]["x_tensor"]: (T, N, N)
-        batch[i]["y_tensor"]: (K, N, N)
-    """
 
+def graph_collate_fn(batch, static_edge_index):
     data_list = []
     B = len(batch)
     T = batch[0]["x_tensor"].shape[0]
@@ -24,33 +19,51 @@ def graph_collate_fn(batch, edge_index):
 
     for b in range(B):
         x_seq = batch[b]["x_tensor"]  # (T, N, N)
-
         for t in range(T):
             od_t = x_seq[t]  # (N, N)
-
-            # edge_attr from OD
-            _, edge_attr = dense_to_sparse(od_t)
+            edge_idx, edge_attr = dense_to_sparse(od_t)
             edge_attr = edge_attr.unsqueeze(-1)
-
-            # node feature (dummy, embedding은 모델에서)
             x_node = torch.zeros(N, 1)
-
             data_list.append(
-                Data(
-                    x=x_node,
-                    edge_index=edge_index,
-                    edge_attr=edge_attr
-                )
+                Data(x=x_node, edge_index=edge_idx, edge_attr=edge_attr)
             )
 
     batch_graph = Batch.from_data_list(data_list)
+    labels = torch.stack([b["y_tensor"] for b in batch])  # (B, K, N, N)
 
-    return {
-        "graph": batch_graph,
-        "B": B,
-        "T": T,
-        "y": torch.stack([b["y_tensor"] for b in batch])  # (B, K, N, N)
-    }
+    return static_edge_index, batch_graph, B, T, labels
+
+def graph_week_collate_fn(batch, static_edge_index):
+    data_list = []
+    B = len(batch)
+    T = batch[0]["x_tensor"].shape[0]
+    N = batch[0]["x_tensor"].shape[1]
+
+    time_hist_list = []
+    weekday_list = []
+
+    for b in range(B):
+        x_seq = batch[b]["x_tensor"]
+        time_hist_list.append(batch[b]["time_enc_hist"])
+        weekday_list.append(batch[b]["weekday_tensor"])
+
+        for t in range(T):
+            od_t = x_seq[t]
+            edge_idx, edge_attr = dense_to_sparse(od_t)
+            edge_attr = edge_attr.unsqueeze(-1)
+            x_node = torch.zeros(N, 1)
+            data_list.append(
+                Data(x=x_node, edge_index=edge_idx, edge_attr=edge_attr)
+            )
+
+    batch_graph = Batch.from_data_list(data_list)
+    labels = torch.stack([b["y_tensor"] for b in batch])
+    time_enc_hist = torch.stack(time_hist_list)  # [B, T, 2]
+    weekday = torch.stack(weekday_list)         # [B]
+
+    return static_edge_index, batch_graph, B, T, labels, time_enc_hist, weekday
+
+
 
 
 def build_time_sin_cos(minute_indices, period=1440):
