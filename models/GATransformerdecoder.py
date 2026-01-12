@@ -160,7 +160,7 @@ class GATTransformerOD(nn.Module):
         # Transform time series into hid dim
         node_feats = self.node_embed.weight  # [N, node_feat_dim]
         node_features = node_feats.unsqueeze(0).repeat(B*T, 1, 1)  # [B*T, N, node_feat_dim]
-        batch_graph.x = node_features.reshape(B*T*N, node_feat_dim)
+        batch_graph.x = node_features.reshape(B*T*N, self.node_feat_dim)
         
         temporal_emb = self.dynamic_encoder(batch_graph.x, batch_graph.edge_index, batch_graph.edge_attr)
         temporal_emb = temporal_emb.view(B, T, N, self.spatial_dim)
@@ -196,6 +196,137 @@ class GATTransformerOD(nn.Module):
         preds = torch.stack(preds, dim=1)  # [B, future_steps, N, N]
 
         return preds
+
+
+# -----------------------------------------------
+# GAT + Transformer OD Prediction Model
+# -----------------------------------------------
+class GATTransformerODWeek(nn.Module):
+    def __init__(self,
+                 num_nodes,
+                 node_feat_dim,
+                 gat_hid_dim=32,
+                 heads=4,
+                 decode_num_layers=2,
+                 num_future_steps=6,
+                 weekday_emb_dim=8,
+                 time_enc_dim=2):
+        super(GATTransformerODWeek, self).__init__()
+
+        self.num_nodes = num_nodes
+        self.node_feat_dim = node_feat_dim
+        self.spatial_dim = gat_hid_dim
+        self.model_dim = gat_hid_dim
+        self.future_steps = num_future_steps
+
+        # ----- NODE FEATURE OPTIONS -----
+        # base trainable embedding
+        self.node_embed = nn.Embedding(num_nodes, node_feat_dim)
+        # weekday embedding (0..6)
+        self.weekday_embed = nn.Embedding(7, weekday_emb_dim)
+        # linear to project time encoding into model_dim
+        self.time_enc_linear = nn.Linear(time_enc_dim, gat_hid_dim)
+
+        # ----- STATIC SPATIAL ENCODER -----
+        self.short_spatial_encoder = StaticGATEncoder(node_feat_dim + weekday_emb_dim, gat_hid_dim,
+                                                      heads=heads, layers=1)
+        self.long_spatial_encoder = StaticGATEncoder(node_feat_dim + weekday_emb_dim, gat_hid_dim,
+                                                     heads=heads, layers=3)
+
+        # ----- DYNAMIC SPATIAL ENCODER -----
+        # dynamic uses (node_features + weekday)
+        self.dynamic_encoder = DynamicGATEncoder(gat_hid_dim, gat_hid_dim,
+                                                  heads=heads, edge_attr_dim=1)
+
+        # positional encoding for transformer
+        self.pos_enc = PositionalEncoding(self.model_dim)
+
+        # transformer decoder
+        self.decoder = TimeTransformerDecoder(
+            hid_dim=self.model_dim,
+            num_heads=8,
+            ff_dim=self.model_dim * 4,
+            num_layers=decode_num_layers
+        )
+
+        # predictor (optional output projection)
+        self.predictor = nn.Linear(self.model_dim, node_feat_dim)
+
+    def forward(self, adjency_edge_index, batch_graph, B, T, time_enc_hist, weekday_tensor):
+        N = self.num_nodes
+
+        # ========== STATIC SPATIAL EMBEDDING ==========
+
+        # base node feature
+        base_node_feat = self.node_embed.weight  # [N, node_feat_dim]
+        # weekday per sample
+        weekday_emb = self.weekday_embed(weekday_tensor)  # [B, weekday_emb_dim]
+
+        # expand weekday to (B, N, weekday_emb_dim)
+        weekday_rep = weekday_emb.unsqueeze(1).repeat(1, N, 1)  # [B, N, W]
+        # flatten static node features by weekday
+        static_node_feat = base_node_feat.unsqueeze(0).repeat(B, 1, 1)  # [B, N, node_feat_dim]
+        static_node_feat = torch.cat([static_node_feat, weekday_rep], dim=-1)  # [B, N, node_feat_dim+W]
+
+        # merge B dimension for static GAT (shared graph)
+        static_node_feat_flat = static_node_feat.view(B * N, -1)
+        short_sp_emb = self.short_spatial_encoder(static_node_feat_flat, adjency_edge_index)
+        long_sp_emb = self.long_spatial_encoder(static_node_feat_flat, adjency_edge_index)
+        spatial_emb = short_sp_emb + long_sp_emb
+        spatial_emb = spatial_emb.view(B, N, self.spatial_dim)
+
+        # ========== DYNAMIC SPATIAL ENCODING ==========
+
+        # prepare node features for dynamic
+        # dynamic input uses spatial_emb (so dynamic GAT sees learned static space + weekday)
+        node_dyn_feat = spatial_emb.unsqueeze(1).repeat(1, T, 1, 1)  # [B, T, N, D]
+        node_dyn_feat = node_dyn_feat.view(B * T * N, self.spatial_dim)
+
+        # assign node features to batch_graph
+        batch_graph.x = node_dyn_feat
+
+        # dynamic GAT (uses OD flow edge_attr)
+        dyn_out = self.dynamic_encoder(batch_graph.x, batch_graph.edge_index, batch_graph.edge_attr)
+        dyn_out = dyn_out.view(B, T, N, self.spatial_dim)
+
+        # fuse static + dynamic
+        spatial_time = dyn_out + spatial_emb.unsqueeze(1)  # [B, T, N, D]
+
+        # ========== TIME ENCODING INTEGRATION ==========
+
+        # time_enc_hist: [B, T, 2]
+        time_enc_lin = self.time_enc_linear(time_enc_hist)  # [B, T, model_dim]
+        time_enc_lin = time_enc_lin.unsqueeze(2).repeat(1, 1, N, 1)  # [B, T, N, D]
+
+        fused = spatial_time + time_enc_lin  # integrate time positional feature
+
+        # prepare transformer
+        fused_seq = fused.permute(1, 0, 2, 3).reshape(T, B * N, self.spatial_dim)
+        fused_seq = self.pos_enc(fused_seq)
+
+        # ========== TRANSFORMER DECODING ==========
+
+        tgt = torch.zeros(self.future_steps, B * N, self.spatial_dim, device=fused_seq.device)
+        dec_out = self.decoder(tgt, fused_seq)
+
+        # ========== OD PREDICTION ==========
+
+        dec_out = dec_out.view(self.future_steps, B, N, self.spatial_dim)
+        preds = []
+        for t in range(self.future_steps):
+            H = dec_out[t]  # [B, N, D]
+            od_t = torch.matmul(H, H.transpose(-1, -2))
+            preds.append(od_t)
+        preds = torch.stack(preds, dim=1)  # [B, future_steps, N, N]
+
+        return preds
+# preds = model(
+#     static_edge_index,
+#     batch_graph,
+#     B, T,
+#     time_enc_hist,      # from collate batch
+#     weekday_tensor      # from collate batch
+# )
 
 if __name__ == "__main__":
 

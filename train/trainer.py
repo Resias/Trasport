@@ -281,53 +281,72 @@ class MPGCNLM(L.LightningModule):
     def configure_optimizers(self):
         return Adam(self.parameters(), lr=self.lr)
 
+
 class MetroGraphLM(L.LightningModule):
-    def __init__(self, model, loss, lr):
+    def __init__(self, model, loss=torch.nn.MSELoss(), lr=1e-3):
         super().__init__()
         self.model = model
         self.loss_fn = loss
         self.lr = lr
 
-    def forward_batch(self, batch):
-        graph = batch["graph"]
-        B = batch["B"]
-        T = batch["T"]
-        y_true = batch["y"]  # (B, K, N, N)
-
-        y_pred = self.model(
-            adjency_edge_index=self.model.edge_index,
-            batch_graph=graph,
-            B=B,
-            T=T
-        )
-        return y_pred, y_true, B
+    def forward(self, static_edge_index, batch_graph, B, T):
+        return self.model(static_edge_index, batch_graph, B, T)
 
     def training_step(self, batch, batch_idx):
-        y_pred, y_true, B = self.forward_batch(batch)
-        loss = self.loss_fn(y_pred, y_true)
+        # batch is a tuple from graph_collate_fn
+        static_edge_index, batch_graph, B, T, labels = batch
 
-        self.log(
-            "train_loss",
-            loss,
-            prog_bar=True,
-            on_step=True,
-            on_epoch=True,
-            batch_size=B,
-        )
+        # forward
+        preds = self.model(static_edge_index, batch_graph, B, T)
+        loss = self.loss_fn(preds, labels)
+
+        self.log("train/loss", loss, prog_bar=True)
         return loss
 
     def validation_step(self, batch, batch_idx):
-        y_pred, y_true, B = self.forward_batch(batch)
-        loss = self.loss_fn(y_pred, y_true)
+        static_edge_index, batch_graph, B, T, labels = batch
 
-        self.log(
-            "val_loss",
-            loss,
-            prog_bar=True,
-            on_epoch=True,
-            batch_size=B,
-        )
+        preds = self.model(static_edge_index, batch_graph, B, T)
+        loss = self.loss_fn(preds, labels)
+
+        self.log("val/loss", loss, prog_bar=True)
         return loss
 
     def configure_optimizers(self):
-        return Adam(self.parameters(), lr=self.lr)
+        return torch.optim.Adam(self.model.parameters(), lr=self.lr)
+
+
+class MetroGraphWeekLM(L.LightningModule):
+    def __init__(self, model, loss=torch.nn.MSELoss(), lr=1e-3):
+        super().__init__()
+        self.model = model
+        self.loss_fn = loss
+        self.lr = lr
+
+    def forward(self, static_edge_index, batch_graph, B, T):
+        return self.model(static_edge_index, batch_graph, B, T)
+
+    def training_step(self, batch, batch_idx):
+        # batch is a tuple from graph_collate_fn
+        static_edge_index, batch_graph, B, T, labels, time_enc_hist, weekday = batch
+
+        # forward
+        preds = self.model(static_edge_index, batch_graph, B, T, time_enc_hist, weekday)
+        loss = self.loss_fn(preds, labels)
+
+        self.log("train/loss", loss, prog_bar=True)
+        return loss
+
+    def validation_step(self, batch, batch_idx):
+        static_edge_index, batch_graph, B, T, labels, time_enc_hist, weekday = batch
+
+        # forward
+        preds = self.model(static_edge_index, batch_graph, B, T, time_enc_hist, weekday)
+        loss = self.loss_fn(preds, labels)
+
+        self.log("val/loss", loss, prog_bar=True)
+        return loss
+
+    def configure_optimizers(self):
+        return torch.optim.Adam(self.model.parameters(), lr=self.lr)
+
