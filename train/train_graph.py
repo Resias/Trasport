@@ -25,6 +25,7 @@ def main():
     parser.add_argument("--data_root", default="/home/data/od_minute")
     parser.add_argument("--train_subdir", default="train")
     parser.add_argument("--val_subdir", default="test")
+    parser.add_argument("--cache_dataset", action="store_true")
     parser.add_argument("--od_csv", default="./AD_matrix_trimmed_common.csv")
     parser.add_argument("--window_size", type=int, default=60)
     parser.add_argument("--pred_size", type=int, default=30)
@@ -58,7 +59,8 @@ def main():
         val_subdir=args.val_subdir,
         window_size=args.window_size,
         hop_size=args.hop_size,
-        pred_size=args.pred_size
+        pred_size=args.pred_size,
+        cache_in_mem=True if args.cache_dataset else False
     )
 
     # =====================
