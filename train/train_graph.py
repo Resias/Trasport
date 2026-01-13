@@ -30,6 +30,8 @@ def main():
     parser.add_argument("--pred_size", type=int, default=30)
     parser.add_argument("--hop_size", type=int, default=10)
     parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--node_feat_dim", type=int, default=1)
+    parser.add_argument("--decode_num_layers", type=int, default=2)
     parser.add_argument("--use_weekday", action="store_true")
     parser.add_argument("--use_ddp", action="store_true", help="Enable Distributed Data Parallel training")
     parser.add_argument("--num_workers", type=int, default=4)
@@ -81,15 +83,12 @@ def main():
             collate_fn=lambda batch: graph_collate_fn(batch, static_edge_index),
             pin_memory=True,
         )
-
-    # =====================
-    # Model
-    # =====================
         model = GATTransformerOD(
             num_nodes=static_edge_index.max().item() + 1,
-            node_feat_dim=1,
+            node_feat_dim=args.node_feat_dim,
             gat_hid_dim=args.gat_hidden,
             num_future_steps=args.pred_size,
+            decode_num_layers=args.decode_num_layers
         )
 
         model.static_edge_index = static_edge_index
@@ -114,9 +113,10 @@ def main():
         )
         model = GATTransformerODWeek(
             num_nodes=static_edge_index.max().item() + 1,
-            node_feat_dim=1,
+            node_feat_dim=args.node_feat_dim,
             gat_hid_dim=args.gat_hidden,
             num_future_steps=args.pred_size,
+            decode_num_layers=args.decode_num_layers
         )
 
         model.static_edge_index = static_edge_index
@@ -136,7 +136,7 @@ def main():
     accelerator = resolve_accelerator()
 
     # 기본 strategy
-    strategy = None
+    strategy = "auto"
     devices = 1
     
     if args.use_ddp:
