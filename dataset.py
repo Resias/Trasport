@@ -681,7 +681,7 @@ class CacheDataset(Dataset):
     def __getitem__(self, index):
         return self.data[index]
 
-def get_dataset(data_root, train_subdir, val_subdir, window_size, hop_size, pred_size):
+def get_dataset(data_root, train_subdir, val_subdir, window_size, hop_size, pred_size, cache_in_mem=True):
     
     # train_pt = os.path.join(data_root, 'train.pt')
     # val_pt = os.path.join(data_root, 'val.pt')
@@ -700,13 +700,15 @@ def get_dataset(data_root, train_subdir, val_subdir, window_size, hop_size, pred
         data_root=train_path,
         window_size=window_size,
         hop_size=hop_size,
-        pred_size=pred_size
+        pred_size=pred_size,
+        cache_in_mem=cache_in_mem
     )
     valset = MetroDataset(
         data_root=val_path,
         window_size=window_size,
         hop_size=hop_size,
-        pred_size=pred_size
+        pred_size=pred_size,
+        cache_in_mem=cache_in_mem
     )
     
     # print('data caching...')
