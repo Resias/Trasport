@@ -227,13 +227,14 @@ class MetroDataset(Dataset):
     운영시간만 사용: 05:30(=330분) ~ 24:00(=1440분)
     """
 
-    def __init__(self, data_root, window_size, hop_size, pred_size):
+    def __init__(self, data_root, window_size, hop_size, pred_size, cache_in_mem=True):
         super().__init__()
 
         self.data_root = data_root
         self.window_size = window_size
         self.hop_size = hop_size
         self.pred_size = pred_size
+        self.cache_mem = cache_in_mem
 
         # 하루 중 사용할 구간 (분)
         self.day_start_minute = 5 * 60 + 30  # 05:30 -> 330
@@ -248,8 +249,11 @@ class MetroDataset(Dataset):
         self.day_data_cache = []
         for path in tqdm(self.data_paths):
             arr = np.load(path, mmap_mode='r')  # shape: [1440, N, N]
-            # self.day_data_cache.append(torch.tensor(arr, dtype=torch.float32))
-            self.day_data_cache.append(arr)
+            if not cache_in_mem:
+                self.day_data_cache.append(arr)
+            else:
+                self.day_data_cache.append(torch.tensor(arr, dtype=torch.float32))
+            
         print("Caching completed.")
         
         # ---- 3) sliding window 정보 생성 ----
@@ -280,11 +284,16 @@ class MetroDataset(Dataset):
         day_data = self.day_data_cache[file_idx]  # (1440, N, N)
         
         # slicing
-        x_numpy = day_data[start_idx:start_idx+self.window_size].copy()
-        y_numpy = day_data[start_idx+self.window_size:
-                            start_idx+self.window_size+self.pred_size].copy()
-        x_tensor = torch.from_numpy(x_numpy).float()
-        y_tensor = torch.from_numpy(y_numpy).float()
+        if self.cache_mem:
+            x_tensor = day_data[start_idx:start_idx+self.window_size]
+            y_tensor = day_data[start_idx+self.window_size:
+                                start_idx+self.window_size+self.pred_size]
+        else:
+            x_numpy = day_data[start_idx:start_idx+self.window_size].copy()
+            y_numpy = day_data[start_idx+self.window_size:
+                                start_idx+self.window_size+self.pred_size].copy()
+            x_tensor = torch.from_numpy(x_numpy).float()
+            y_tensor = torch.from_numpy(y_numpy).float()
 
         # time encoding
         hist_minutes = torch.arange(start_idx, start_idx+self.window_size) % 1440
