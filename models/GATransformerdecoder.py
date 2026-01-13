@@ -168,7 +168,6 @@ class GATTransformerOD(nn.Module):
         spatial_emb = spatial_emb.expand(B, T, N, -1)
         spatial_time_emb = temporal_emb + F.tanh(spatial_emb)
         dyn_out = spatial_time_emb.view(B, T, N, self.spatial_dim)
-
         
         # -----------------------------------
         # 4) Sequence fusion
