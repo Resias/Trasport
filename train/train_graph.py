@@ -30,6 +30,7 @@ def main():
     parser.add_argument("--pred_size", type=int, default=30)
     parser.add_argument("--hop_size", type=int, default=10)
     parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--gat_heads", type=int, default=4)
     parser.add_argument("--node_feat_dim", type=int, default=1)
     parser.add_argument("--decode_num_layers", type=int, default=2)
     parser.add_argument("--use_weekday", action="store_true")
@@ -86,6 +87,7 @@ def main():
         model = GATTransformerOD(
             num_nodes=static_edge_index.max().item() + 1,
             node_feat_dim=args.node_feat_dim,
+            heads=args.gat_heads,
             gat_hid_dim=args.gat_hidden,
             num_future_steps=args.pred_size,
             decode_num_layers=args.decode_num_layers
@@ -113,6 +115,7 @@ def main():
         )
         model = GATTransformerODWeek(
             num_nodes=static_edge_index.max().item() + 1,
+            heads=args.gat_heads,
             node_feat_dim=args.node_feat_dim,
             gat_hid_dim=args.gat_hidden,
             num_future_steps=args.pred_size,
@@ -152,7 +155,7 @@ def main():
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     run_name = f"{model_type}_wd{args.use_weekday}_bs{args.batch_size}_T{args.window_size}_P{args.pred_size}_{timestamp}"
 
-    logger = WandbLogger(project=args.wandb_project, name=run_name)
+    logger = WandbLogger(project=args.wandb_project, name=run_name, config=vars(args))
 
     trainer = L.Trainer(
         max_epochs=args.max_epochs,
