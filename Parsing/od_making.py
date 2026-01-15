@@ -109,7 +109,6 @@ def compute_minute_OD(day_files, station2id):
 
     return OD
 
-
 def compute_hourly_OD(day_files, station2id):
     N = len(station2id)
     # 총 24시간

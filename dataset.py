@@ -1,5 +1,4 @@
 # dataset.py
-
 import os
 import datetime
 import argparse
@@ -33,6 +32,7 @@ def graph_collate_fn(batch, static_edge_index):
 
     return static_edge_index, batch_graph, B, T, labels
 
+
 def graph_week_collate_fn(batch, static_edge_index):
     data_list = []
     B = len(batch)
@@ -64,8 +64,6 @@ def graph_week_collate_fn(batch, static_edge_index):
     return static_edge_index, batch_graph, B, T, labels, time_enc_hist, weekday
 
 
-
-
 def build_time_sin_cos(minute_indices, period=1440):
     """
     minute_indices: 1D numpy array or list of int (분단위 인덱스, 0~1439)
@@ -80,6 +78,7 @@ def build_time_sin_cos(minute_indices, period=1440):
     cos_vals = np.cos(angles)
     enc = np.stack([sin_vals, cos_vals], axis=-1)  # [T, 2]
     return torch.tensor(enc, dtype=torch.float32)
+
 
 def weekday_onehot(weekday):
     # weekday: 0~6  (월~일)
@@ -419,184 +418,200 @@ class ODPairDatasetV2(Dataset):
         }
 
 
-
 # ==========================================
 # 3. Dataset (Lag Logic Integrated)
 # ==========================================
 class STLSTMDataset(Dataset):
     """
-    논문 ST-LSTM의 Temporal Lag 제약(W_matrix)을 논문 의도대로 구현한 Dataset.
-    
-    수정 사항:
-    1. Lag Masking(0으로 지움) -> Lag Shifting(과거 시점으로 윈도우 이동)
-    2. Inflow/Outflow는 Real-time 데이터이므로 Lag 미적용
-    3. Local Normalization 제거 (절대적 크기 정보 보존)
+    ST-LSTM Dataset (Paper-faithful implementation)
+
+    Input:
+        X ∈ R^{(aH + h, x + 3)}
+    Target:
+        y ∈ R^{(pred, 1)}
+
+    where:
+        a  = number of historical days
+        H  = historical window length
+        h  = realtime window length
+        x  = number of spatially correlated OD pairs
     """
 
     def __init__(
         self,
-        data_root,
-        window_size,
-        hop_size,
-        pred_size,
-        target_s,
-        target_e,
-        neighbors,
-        W_matrix,
-        use_weekday=True,
-        use_time=True,
-        normalize=False # Local normalization은 꺼두는 것이 좋음
+        data_root: str,
+        H: int,                    # historical window
+        h: int,                    # realtime window
+        pred_size: int,
+        target_s: int,
+        target_e: int,
+        day_cluster_path: str,     # .npy (dict)
+        top_x_od_path: str,        # .npy (dict)
+        W_path: str,               # .npy (dict)
+        a: int = 3                 # number of historical days
     ):
         super().__init__()
 
-        self.data_root = data_root
-        self.window = window_size
-        self.hop = hop_size
+        # -------------------------
+        # Hyperparameters
+        # -------------------------
+        self.H = H
+        self.h = h
         self.pred = pred_size
+        self.a = a
 
         self.s = target_s
         self.e = target_e
-        self.neighbors = neighbors
-        self.W = W_matrix.astype(int)
 
-        self.use_weekday = use_weekday
-        self.use_time = use_time
-        self.normalize = normalize
+        # Operating time (minutes)
+        self.day_start = 330   # 05:30
+        self.day_end = 1440    # 24:00
 
-        # 운영 시간(05:30 ~ 24:00)
-        self.day_start = 330
-        self.day_end = 1440
+        # -------------------------
+        # Load offline artifacts
+        # -------------------------
+        self.day_cluster = np.load(day_cluster_path, allow_pickle=True).item()
+        self.top_x_od = np.load(top_x_od_path, allow_pickle=True).item()
+        self.W = np.load(W_path, allow_pickle=True).item()
+        self.max_w = max(self.W.values())
 
-        # ======================
-        # Load all .npy into memory
-        # ======================
-        print("[ST-LSTM] Loading OD matrices...")
-        file_names = sorted(os.listdir(data_root))
-        self.paths = [os.path.join(data_root, f) for f in file_names]
+        if (self.s, self.e) not in self.top_x_od:
+            raise KeyError(f"(s,e)=({self.s},{self.e}) not found in top_x_od")
 
-        self.OD = []
-        self.WD = []
+        self.neighbors = [
+            (i, j) for (i, j) in self.top_x_od[(self.s, self.e)]
+            if not (i == self.s and j == self.e)
+        ]
 
-        for fname, path in zip(file_names, self.paths):
-            # 요일 계산
-            ymd = fname.split("_")[-1].split(".")[0]
-            dt = datetime.date(
-                int(ymd[:4]), int(ymd[4:6]), int(ymd[6:])
+        # -------------------------
+        # Load OD matrices
+        # -------------------------
+        files = sorted(os.listdir(data_root))
+        self.OD = [
+            torch.tensor(
+                np.load(os.path.join(data_root, f)),
+                dtype=torch.float32
             )
-            self.WD.append(dt.weekday())
+            for f in tqdm(files, desc="Loading OD matrices for STLSTMDataset")
+        ]
 
-            arr = np.load(path)  # (1440, N, N)
-            self.OD.append(torch.tensor(arr, dtype=torch.float32))
+        # Precompute inflow / outflow
+        self.inflow = [day.sum(dim=2) for day in self.OD]   # (1440, N)
+        self.outflow = [day.sum(dim=1) for day in self.OD]  # (1440, N)
 
-        N = self.OD[0].shape[1]
-        print(f"[ST-LSTM] Loaded {len(self.OD)} days, stations = {N}")
-
-        # Precompute inflow/outflow
-        self.inflow = [day.sum(dim=2) for day in self.OD]
-        self.outflow = [day.sum(dim=1) for day in self.OD]
-
-        # ======================
-        # Build sliding windows
-        # ======================
+        # -------------------------
+        # Build sample index
+        # -------------------------
         self.index = []
-        
-        # Lag 때문에 윈도우가 과거로 밀릴 수 있음을 고려하여 시작 시점 조정
-        # 가장 큰 Lag 값만큼 안전 마진 확보 (여기서는 임의로 60분 추가)
-        safe_start = self.day_start + self.window + 60 
-        
-        for d, wd in enumerate(self.WD):
-            for t in range(safe_start,
-                           self.day_end - self.pred,
-                           self.hop):
-                self.index.append((d, t, wd))
 
-        print(f"[ST-LSTM] Total samples = {len(self.index)}")
+        max_lag = max(self.W.values())
+
+        for d in tqdm(range(len(self.OD)), desc="Building STLSTMDataset index"):
+            # Temporal Feature Extraction (cluster-based days)
+            cid = self.day_cluster[d]
+            L = [dd for dd in range(d) if self.day_cluster[dd] == cid]
+
+            if len(L) < self.a:
+                continue  # not enough historical days
+
+            for t in range(
+                self.day_start + self.H + max_lag,
+                self.day_end - self.pred
+            ):
+                self.index.append((d, t))
+
+        if len(self.index) == 0:
+            raise RuntimeError("STLSTMDataset has no valid samples.")
 
     def __len__(self):
         return len(self.index)
 
-    def __getitem__(self, idx):
-        d, t, wd = self.index[idx]
-
-        od = self.OD[d]        # (1440, N, N)
-        infl = self.inflow[d]  # (1440, N)
-        out = self.outflow[d]  # (1440, N)
-
-        features = []
-
-        # ===========================================
-        # Feature 1: Target OD (with Lag Shifting)
-        # 논문: "select the latest h time slot data" considering W_ij
-        # 입력 범위: [t - window - lag : t - lag]
-        # ===========================================
-        lag_se = int(self.W[self.s, self.e])
-        t_end_se = t - lag_se
-        t_start_se = t_end_se - self.window
-        
-        # Boundary Check (혹시 음수가 되면 0으로 패딩)
-        if t_start_se < 0:
-             tgt_feat = torch.zeros(self.window, 1)
+    # ==========================================================
+    # Eq.(26): Historical OD sequence
+    # ==========================================================
+    def _get_w(self, i, j):
+        """
+        Safe W accessor.
+        Fallback to max W if missing.
+        """
+        if (i, j) in self.W:
+            return self.W[(i, j)]
         else:
-             tgt_feat = od[t_start_se:t_end_se, self.s, self.e].unsqueeze(-1)
-        
-        features.append(tgt_feat)
+            # 논문상 W는 OD travel time upper bound
+            # fallback = max observed W (conservative)
+            return self.max_w
+    
+    def _historical_seq(self, day_list, i, j, t):
+        w = self._get_w(i, j)
+        seqs = []
+        for dd in day_list:
+            t_end = t - w
+            t_start = t_end - self.H
+            seqs.append(self.OD[dd][t_start:t_end, i, j])
+        return torch.cat(seqs, dim=0)
 
-        # ===========================================
-        # Feature 2: Neighbors (with Lag Shifting)
-        # ===========================================
-        for (i, j) in self.neighbors:
-            lag_ij = int(self.W[i, j])
-            t_end_ij = t - lag_ij
-            t_start_ij = t_end_ij - self.window
-            
-            if t_start_ij < 0:
-                feat_ij = torch.zeros(self.window, 1)
-            else:
-                feat_ij = od[t_start_ij:t_end_ij, i, j].unsqueeze(-1)
-            features.append(feat_ij)
 
-        # ===========================================
-        # Feature 3: Inflow/Outflow (Real-time, No Lag)
-        # 논문: "Real-time inflow/outflow are available."
-        # 입력 범위: [t - window : t]
-        # ===========================================
-        # Inflow at Origin Station (s)
-        inflow_feat = infl[t - self.window : t, self.s].unsqueeze(-1)
-        # Outflow at Destination Station (e)
-        outflow_feat = out[t - self.window : t, self.e].unsqueeze(-1)
+    # ==========================================================
+    # Eq.(27): Realtime OD sequence
+    # ==========================================================
+    def _realtime_seq(self, d, i, j, t):
+        w = self._get_w(i, j)
+        t_end = t - w
+        t_start = t_end - self.h
+        return self.OD[d][t_start:t_end, i, j]
 
-        features.append(inflow_feat)
-        features.append(outflow_feat)
+    # ==========================================================
+    # Dataset fetch
+    # ==========================================================
+    def __getitem__(self, idx):
+        d, t = self.index[idx]
 
-        # ===========================================
-        # Feature 4: Time encoding (Current Context)
-        # 입력 범위: [t - window : t]
-        # ===========================================
-        if self.use_time:
-            mins = np.arange(t - self.window, t) % 1440
-            time_enc = build_time_sin_cos(mins)  # (Window, 2)
-            features.append(time_enc)
+        # Temporal cluster days
+        cid = self.day_cluster[d]
+        L = [dd for dd in range(d) if self.day_cluster[dd] == cid]
+        L = L[-self.a:]  # most recent a days
 
-        # ===========================================
-        # Feature 5: Weekday one-hot
-        # ===========================================
-        if self.use_weekday:
-            wd_feat = weekday_onehot(wd).unsqueeze(0).repeat(self.window, 1)
-            features.append(wd_feat)
+        rows = []
 
-        # ===========================================
-        # Combine features
-        # ===========================================
-        x = torch.cat(features, dim=-1)  # (Window, F)
+        # --------------------------------------------------
+        # Target OD + Spatially correlated neighbors
+        # --------------------------------------------------
+        for (i, j) in [(self.s, self.e)] + self.neighbors:
+            hist = self._historical_seq(L, i, j, t)
+            real = self._realtime_seq(d, i, j, t)
+            rows.append(torch.cat([hist, real], dim=0))
 
-        # ===========================================
-        # Prediction target (Future, No Lag)
-        # ===========================================
-        y = od[t : t + self.pred, self.s, self.e].unsqueeze(-1)  # (Pred, 1)
+        # --------------------------------------------------
+        # Outflow at origin station s
+        # --------------------------------------------------
+        hist_out = torch.cat([
+            self.outflow[dd][t - self.H:t, self.s] for dd in L
+        ])
+        real_out = self.outflow[d][t - self.h:t, self.s]
+        rows.append(torch.cat([hist_out, real_out], dim=0))
 
-        # Local Normalization 삭제됨 (필요시 Global Scaler 사용 권장)
-        
-        return {"x": x.float(), "y": y.float()}
+        # --------------------------------------------------
+        # Inflow at destination station e
+        # --------------------------------------------------
+        hist_in = torch.cat([
+            self.inflow[dd][t - self.H:t, self.e] for dd in L
+        ])
+        real_in = self.inflow[d][t - self.h:t, self.e]
+        rows.append(torch.cat([hist_in, real_in], dim=0))
+
+        # --------------------------------------------------
+        # Final input tensor
+        # --------------------------------------------------
+        X = torch.stack(rows, dim=0).T   # (aH + h, x + 3)
+
+        # Prediction target
+        y = self.OD[d][t:t + self.pred, self.s, self.e].unsqueeze(-1)
+
+        return {
+            "x": X.float(),
+            "y": y.float()
+        }
+
 
 # ==========================================
 # 4. MPGCN Dataset
@@ -673,14 +688,6 @@ def get_mpgcn_dataset(data_root, train_subdir, val_subdir, window_size, hop_size
     
     return trainset, valset
 
-class CacheDataset(Dataset):
-    def __init__(self, pt_path):
-        self.data = torch.load(pt_path, weights_only=True)
-    def __len__(self):
-        return len(self.data)
-    def __getitem__(self, index):
-        return self.data[index]
-
 def get_dataset(data_root, train_subdir, val_subdir, window_size, hop_size, pred_size, cache_in_mem=True):
     
     # train_pt = os.path.join(data_root, 'train.pt')
@@ -741,78 +748,56 @@ def get_odpair_dataset(data_root, train_subdir, val_subdir,
     )
     return trainset, valset
 
-def get_st_lstm_dataset(data_root, train_subdir, val_subdir,
-                        window_size, hop_size, pred_size,
-                        target_s, target_e, top_k=3,
-                        dist_matrix=None, W_matrix=None):
+def get_st_lstm_dataset(
+    data_root,
+    train_subdir,
+    val_subdir,
+    H,
+    h,
+    pred_size,
+    target_s,
+    target_e,
+    a,
+    day_cluster_path,
+    top_x_od_path,
+    W_path
+):
     """
-    ST-LSTM 모델 학습을 위한 데이터셋 생성 헬퍼 함수.
-    
-    1. 거리 행렬(dist)과 이동 시간 행렬(W)을 로드 (없으면 더미 생성).
-    2. SpatialCorrelationSelector를 통해 이웃 OD 자동 선정.
-    3. Train/Val Dataset 반환.
+    Paper-faithful ST-LSTM dataset loader.
+
+    All spatial / temporal artifacts are assumed
+    to be precomputed offline.
     """
-    
+
     train_path = os.path.join(data_root, train_subdir)
     val_path = os.path.join(data_root, val_subdir)
 
-    # 1. 행렬(Matrix) 준비
-    # N(역 개수) 확인을 위해 샘플 파일 하나 로드
-    sample_files = sorted(os.listdir(train_path))
-    if not sample_files:
-        raise FileNotFoundError(f"No .npy files found in {train_path}")
-        
-    temp_data = np.load(os.path.join(train_path, sample_files[0]))
-    N = temp_data.shape[1]
-
-    # 거리 행렬 (Distance Matrix) - r_ij 계산용
-    if dist_matrix is None:
-        dist_path = os.path.join(data_root, "dist_matrix.npy")
-        if os.path.exists(dist_path):
-            print(f"Loading dist_matrix from {dist_path}")
-            dist_matrix = np.load(dist_path)
-        else:
-            print("Warning: 'dist_matrix.npy' not found. Using Random Dummy Matrix.")
-            dist_matrix = np.random.rand(N, N) * 10  # Dummy
-
-    # 이동 시간 제한 행렬 (W Matrix) - Lag 계산용
-    if W_matrix is None:
-        w_path = os.path.join(data_root, "W_matrix.npy")
-        if os.path.exists(w_path):
-            print(f"Loading W_matrix from {w_path}")
-            W_matrix = np.load(w_path)
-        else:
-            print("Warning: 'W_matrix.npy' not found. Using Random Dummy Matrix (5~30 mins).")
-            W_matrix = np.random.randint(5, 30, size=(N, N))
-
-    # 2. 이웃 선정 (Neighbor Selection)
-    print(f"Selecting Top-{top_k} Neighbors for OD ({target_s}->{target_e})...")
-    selector = SpatialCorrelationSelector(data_root, train_subdir, dist_matrix, top_k=top_k)
-    neighbors = selector.select_neighbors(target_s, target_e)
-    
-    # 3. 데이터셋 생성
     trainset = STLSTMDataset(
         data_root=train_path,
-        window_size=window_size,
-        hop_size=hop_size,
+        H=H,
+        h=h,
         pred_size=pred_size,
         target_s=target_s,
         target_e=target_e,
-        neighbors=neighbors,
-        W_matrix=W_matrix
+        day_cluster_path=day_cluster_path,
+        top_x_od_path=top_x_od_path,
+        W_path=W_path,
+        a=a
     )
-    
+
     valset = STLSTMDataset(
         data_root=val_path,
-        window_size=window_size,
-        hop_size=hop_size,
+        H=H,
+        h=h,
         pred_size=pred_size,
         target_s=target_s,
         target_e=target_e,
-        neighbors=neighbors,
-        W_matrix=W_matrix
+        day_cluster_path=day_cluster_path,
+        top_x_od_path=top_x_od_path,
+        W_path=W_path,
+        a=a
     )
-    
+
     return trainset, valset
 
 
