@@ -314,7 +314,6 @@ def compute_spatial_correlation_pruned(
 
     return top_x_od
 
-
 def collect_od_travel_times(afc_records):
     """
     afc_records: iterable of dict
