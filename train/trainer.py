@@ -350,3 +350,88 @@ class MetroGraphWeekLM(L.LightningModule):
     def configure_optimizers(self):
         return torch.optim.Adam(self.model.parameters(), lr=self.lr)
 
+
+class STDAMHGNLitModule(L.LightningModule):
+    def __init__(
+        self,
+        model,
+        loss,
+        lr=1e-3,
+        mape_eps=1e-3
+    ):
+        super().__init__()
+        self.model = model
+        self.lr = lr
+        self.loss_fn = loss
+        self.mape_eps = mape_eps
+
+    def forward(self, tendency, periodicity):
+        return self.model(tendency, periodicity)
+
+    # -------------------------
+    # Metrics (paper-style)
+    # -------------------------
+    def _compute_metrics(self, y_true, y_pred):
+        """
+        y_true, y_pred: (B, |V|)
+        """
+        mask = (y_true > 0).float()
+
+        mse = ((y_true - y_pred) ** 2 * mask).sum() / mask.sum()
+        mae = (torch.abs(y_true - y_pred) * mask).sum() / mask.sum()
+
+        denom = torch.clamp(torch.abs(y_true), min=self.mape_eps)
+        mape = (torch.abs((y_true - y_pred) / denom) * mask).sum() / mask.sum() * 100
+
+        smape_ = smape(
+            y_true * mask,
+            y_pred * mask,
+            eps=self.mape_eps
+        )
+        rmse = torch.sqrt(mse)
+
+        return mse, mae, mape, smape_, rmse
+
+    # -------------------------
+    # Training
+    # -------------------------
+    def training_step(self, batch, batch_idx):
+        y_pred = self(
+            batch["tendency"],
+            batch["periodicity"]
+        )
+        y_true = batch["y"]
+        mask = (y_true > 0).float()
+        loss = ((y_pred - y_true) ** 2 * mask).sum() / mask.sum()
+        self.log("train_loss", loss, prog_bar=True)
+        return loss
+
+    # -------------------------
+    # Validation
+    # -------------------------
+    def validation_step(self, batch, batch_idx):
+        y_pred = self(
+            batch["tendency"],
+            batch["periodicity"]
+        )
+        y_true = batch["y"]
+        mask = (y_true > 0).float()
+        loss = ((y_pred - y_true) ** 2 * mask).sum() / mask.sum()
+        mse, mae, mape, smape_, rmse = self._compute_metrics(
+            y_true, y_pred
+        )
+
+        self.log("val_mse", mse, prog_bar=True)
+        self.log("val_mae", mae, prog_bar=True)
+        self.log("val_mape", mape, prog_bar=True)
+        self.log("val_smape", smape_, prog_bar=True)
+        self.log("val_rmse", rmse, prog_bar=True)
+        self.log("val_loss", loss, prog_bar=True)
+
+        return mse
+
+    # -------------------------
+    # Optimizer
+    # -------------------------
+    def configure_optimizers(self):
+        return Adam(self.parameters(), lr=self.lr)

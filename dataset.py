@@ -88,7 +88,7 @@ def weekday_onehot(weekday):
 
 
 # ==========================================
-# 2. Spatial Correlation Selector (User Logic Integrated)
+# Spatial Correlation Selector (User Logic Integrated)
 # ==========================================
 
 class SpatialCorrelationSelector:
@@ -311,115 +311,8 @@ class MetroDataset(Dataset):
         }
 
 
-class ODPairDatasetV2(Dataset):
-    """
-    MetroDataset 구조를 그대로 참고한 OD Pair Dataset
-    - 특정 OD pair (i, j)에 대한 시계열만 추출
-    - sliding window 적용
-    - 최종 입력: (T_in, F)
-    - 최종 출력: (T_out, 1)
-    """
-
-    def __init__(self, data_root, window_size, hop_size, pred_size,
-                 od_i, od_j,
-                 use_weekday=True,
-                 use_time_encoding=True):
-        super().__init__()
-
-        self.data_root = data_root
-        self.window_size = window_size
-        self.hop_size = hop_size
-        self.pred_size = pred_size
-        self.i = od_i
-        self.j = od_j
-        self.use_weekday = use_weekday
-        self.use_time_encoding = use_time_encoding
-
-        self.day_start_minute = 5 * 60 + 30  # 330
-        self.day_end_minute = 24 * 60        # 1440
-
-        self.info_list = []
-        self.data_list = []
-
-        file_names = sorted(os.listdir(data_root))
-        self.data_paths = [os.path.join(data_root, f) for f in file_names]
-
-        # ---- 1) 하루치 파일 전체 메모리 캐싱 ----
-        print("Caching OD matrices for ODPairDataset...")
-        self.day_data_cache = []
-        self.weekday_list = []
-        for file_name in file_names:
-            ymd = file_name.split('_')[-1].split('.')[0]
-            date = datetime.date(int(ymd[:4]), int(ymd[4:6]), int(ymd[6:8]))
-            self.weekday_list.append(date.weekday())
-
-        for path in tqdm(self.data_paths):
-            arr = np.load(path)
-            self.day_data_cache.append(torch.tensor(arr, dtype=torch.float32))  
-        print("Caching completed.")
-
-        # ---- 2) sliding window 정의 ----
-        self.info_list = []
-        for file_idx, wd in enumerate(self.weekday_list):
-            for start_idx in range(
-                self.day_start_minute,
-                self.day_end_minute - (self.window_size + self.pred_size),
-                self.hop_size
-            ):
-                self.info_list.append({
-                    "file_idx": file_idx,
-                    "weekday": wd,
-                    "start_idx": start_idx,
-                })
-
-    def __len__(self):
-        return len(self.info_list)
-
-    def __getitem__(self, index):
-        info = self.info_list[index]
-        file_idx = info["file_idx"]
-        weekday = info["weekday"]
-        start_idx = info["start_idx"]
-
-        # -------- 캐싱된 메모리에서 가져오기 --------
-        day_data = self.day_data_cache[file_idx]  # (1440, N, N)
-
-        # 특정 OD pair 시계열 추출
-        od_seq = day_data[:, self.i, self.j]  # (1440,)
-
-        # window slicing
-        x_vals = od_seq[start_idx:start_idx+self.window_size]
-        y_vals = od_seq[start_idx+self.window_size:
-                        start_idx+self.window_size+self.pred_size]
-
-        # Build features
-        # (T_in, 1)
-        flow_feature = x_vals.unsqueeze(-1)
-
-        feat_list = [flow_feature]
-
-        # 시간 인코딩
-        if self.use_time_encoding:
-            hist_minutes = np.arange(start_idx, start_idx+self.window_size) % 1440
-            time_enc_hist = build_time_sin_cos(hist_minutes)
-            feat_list.append(time_enc_hist)
-
-        # 요일 원핫
-        if self.use_weekday:
-            weekday_oh = weekday_onehot(weekday).unsqueeze(0).repeat(self.window_size, 1)
-            feat_list.append(weekday_oh)
-
-        x_feat = torch.cat(feat_list, dim=1)
-        y_feat = y_vals.unsqueeze(-1)
-
-        return {
-            "x": x_feat.float(),     # (T, F)
-            "y": y_feat.float(),     # (1, 1)
-        }
-
-
 # ==========================================
-# 3. Dataset (Lag Logic Integrated)
+# Dataset (Lag Logic Integrated)
 # ==========================================
 class STLSTMDataset(Dataset):
     """
@@ -614,7 +507,7 @@ class STLSTMDataset(Dataset):
 
 
 # ==========================================
-# 4. MPGCN Dataset
+# MPGCN Dataset
 # ==========================================
 class MPGCNDataset(Dataset):
     """
@@ -679,6 +572,137 @@ class MPGCNDataset(Dataset):
         
         return {"x": x_seq, "y": y_seq}
 
+class MetroODHyperDataset(Dataset):
+    """
+    ST-DAMHGN용 Metro OD Dataset
+
+    Input:
+      - tendency: (m, |V|)
+      - periodicity: (n, |V|)
+    Target:
+      - y: (|V|)
+
+    NOTE:
+      - Hypergraph는 여기서 생성하지 않음
+      - Dataset은 OD pair 시계열만 책임
+    """
+
+    def __init__(
+        self,
+        data_root,
+        od2vid,
+        valid_od_pairs,
+        m,              # tendency length
+        n,              # periodicity length
+        hop_size,
+        cache_in_mem=True
+    ):
+        super().__init__()
+
+        self.data_root = data_root
+        self.od2vid = od2vid
+        self.valid_od_pairs = valid_od_pairs
+        self.V = len(valid_od_pairs)
+
+        self.m = m
+        self.n = n
+        self.hop_size = hop_size
+        self.cache_mem = cache_in_mem
+
+        # self.day_start = 5 * 60 + 30   # 330
+        # self.day_end = 24 * 60         # 1440
+        self.day_start = 6 * 60        # 360
+        self.day_end = 23 * 60         # 1380
+
+        file_names = sorted(os.listdir(data_root))
+        self.data_paths = [os.path.join(data_root, f) for f in file_names]
+
+        # ---------- load data ----------
+        self.day_data_cache = []
+        for path in self.data_paths:
+            arr = np.load(path, mmap_mode='r')  # (1440, N, N)
+            if cache_in_mem:
+                arr = torch.tensor(arr, dtype=torch.float32)
+            self.day_data_cache.append(arr)
+
+        # ---------- build index ----------
+        self.index = []
+        for day_idx, file_name in enumerate(file_names):
+            ymd = file_name.split('_')[-1].split('.')[0]
+            date = datetime.date(int(ymd[:4]), int(ymd[4:6]), int(ymd[6:8]))
+
+            for t in range(
+                self.day_start + self.m,
+                self.day_end,
+                self.hop_size
+            ):
+                # periodicity requires previous days
+                if day_idx < self.n:
+                    continue
+
+                self.index.append({
+                    "day_idx": day_idx,
+                    "t": t,
+                    "weekday": date.weekday()
+                })
+
+    def __len__(self):
+        return len(self.index)
+
+    def _extract_od_vector(self, day_data, t):
+        """
+        day_data: (1440, N, N)
+        return: (|V|)
+        """
+        vec = torch.zeros(self.V)
+        mat = day_data[t]
+
+        for (i, j), vid in self.od2vid.items():
+            vec[vid] = mat[i, j]
+
+        return vec
+
+    def __getitem__(self, idx):
+        info = self.index[idx]
+        day_idx = info["day_idx"]
+        t = info["t"]
+
+        # ---------- tendency ----------
+        tendency = []
+        for k in range(self.m):
+            vec = self._extract_od_vector(
+                self.day_data_cache[day_idx],
+                t - k - 1
+            )
+            tendency.append(vec)
+
+        tendency = torch.stack(tendency)  # (m, |V|)
+
+        # ---------- periodicity ----------
+        periodicity = []
+        for k in range(self.n):
+            vec = self._extract_od_vector(
+                self.day_data_cache[day_idx - k - 1],
+                t
+            )
+            periodicity.append(vec)
+
+        periodicity = torch.stack(periodicity)  # (n, |V|)
+
+        # ---------- target ----------
+        y = self._extract_od_vector(
+            self.day_data_cache[day_idx],
+            t
+        )
+
+        return {
+            "tendency": tendency,       # (m, |V|)
+            "periodicity": periodicity, # (n, |V|)
+            "y": y,                     # (|V|)
+            "weekday": torch.tensor(info["weekday"])
+        }
+
+
 def get_mpgcn_dataset(data_root, train_subdir, val_subdir, window_size, hop_size, pred_size):
     train_path = os.path.join(data_root, train_subdir)
     val_path = os.path.join(data_root, val_subdir)
@@ -733,21 +757,6 @@ def get_dataset(data_root, train_subdir, val_subdir, window_size, hop_size, pred
     
     return trainset, valset
 
-
-def get_odpair_dataset(data_root, train_subdir, val_subdir,
-                       window_size, hop_size, pred_size, od_i, od_j):
-    trainset = ODPairDatasetV2(
-        os.path.join(data_root, train_subdir),
-        window_size, hop_size, pred_size,
-        od_i, od_j
-    )
-    valset = ODPairDatasetV2(
-        os.path.join(data_root, val_subdir),
-        window_size, hop_size, pred_size,
-        od_i, od_j
-    )
-    return trainset, valset
-
 def get_st_lstm_dataset(
     data_root,
     train_subdir,
@@ -800,7 +809,55 @@ def get_st_lstm_dataset(
 
     return trainset, valset
 
+def get_stdamhgn_dataset(
+    data_root,
+    train_subdir,
+    val_subdir,
+    hypergraph_path,
+    m,
+    n,
+    hop_size,
+    cache_in_mem=True
+):
+    """
+    Paper-faithful ST-DAMHGN dataset loader.
+    """
 
+    # -------------------------
+    # load hypergraph artifacts
+    # -------------------------
+    hg = torch.load(hypergraph_path)
+
+    valid_od_pairs = hg["valid_od_pairs"]
+    od2vid = hg["od2vid"]
+
+    # -------------------------
+    # dataset paths
+    # -------------------------
+    train_path = os.path.join(data_root, train_subdir)
+    val_path = os.path.join(data_root, val_subdir)
+
+    trainset = MetroODHyperDataset(
+        data_root=train_path,
+        od2vid=od2vid,
+        valid_od_pairs=valid_od_pairs,
+        m=m,
+        n=n,
+        hop_size=hop_size,
+        cache_in_mem=cache_in_mem
+    )
+
+    valset = MetroODHyperDataset(
+        data_root=val_path,
+        od2vid=od2vid,
+        valid_od_pairs=valid_od_pairs,
+        m=m,
+        n=n,
+        hop_size=hop_size,
+        cache_in_mem=cache_in_mem
+    )
+
+    return trainset, valset
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
