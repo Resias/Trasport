@@ -1,4 +1,5 @@
 import os
+import pandas as pd
 import argparse
 import numpy as np
 import torch
@@ -28,6 +29,18 @@ def parse_args():
         type=str,
         default=None,
         help="Optional POI numpy file, shape=(N_station, 6)"
+    )
+    parser.add_argument(
+        "--station_geo_path",
+        type=str,
+        required=True,
+        help="CSV: index=station_name, columns=[lat, lon]"
+    )
+    parser.add_argument(
+        "--ad_matrix_path",
+        type=str,
+        required=True,
+        help="CSV adjacency matrix (index=station, columns=station)"
     )
     parser.add_argument(
         "--save_path",
@@ -70,7 +83,17 @@ def main():
 
     DAY_START = 6 * 60      # 360
     DAY_END   = 23 * 60     # 1380
+    # --------------------------------------------------
+    # 0. LOAD ADJACENCY MATRIX (FOR SPATIAL FALLBACK)
+    # --------------------------------------------------
+    print("Loading adjacency matrix...")
 
+    ad_df = pd.read_csv(args.ad_matrix_path, index_col=0)
+
+    if ad_df.shape[0] != ad_df.shape[1]:
+        raise ValueError("AD matrix must be square")
+
+    print(f"Loaded AD matrix: {ad_df.shape}")
     # --------------------------------------------------
     # 1. LOAD DAILY OD DATA
     # --------------------------------------------------
@@ -149,7 +172,36 @@ def main():
 
     # --------------------------------------------------
     # 5. LOAD POI FEATURES (WITH FALLBACK)
+    #
+    # 5. LOAD STATION GEO (SPATIAL)
     # --------------------------------------------------
+    print("Loading station geo info...")
+
+    geo_df = pd.read_csv(args.station_geo_path, index_col=0)
+    missing_geo = set(ad_df.index) - set(geo_df.index)
+    if len(missing_geo) > 0:
+        print(f"[WARN] Missing geo stations: {len(missing_geo)}")
+
+    # AD index 순서로 재정렬 (핵심)
+    geo_df = geo_df.reindex(ad_df.index)
+
+    # sanity check
+    if len(geo_df) != N:
+        print(f"[WARN] Geo missing detected: geo={len(geo_df)}, N={N}")
+
+        station_latlon = geo_df[["lat", "lon"]].values.astype(np.float32)
+
+        missing_idx = np.where(geo_df["lat"].isna())[0]
+
+        A = ad_df.values
+
+        for mi in missing_idx:
+            neighbors = np.where(A[mi] > 0)[0]
+            fill = station_latlon[neighbors].mean(axis=0)
+            station_latlon = np.insert(station_latlon, mi, fill, axis=0)
+    else:
+        station_latlon = geo_df[["lat", "lon"]].values.astype(np.float32)
+
     use_poi = False
 
     if args.poi_path is not None and os.path.exists(args.poi_path):
@@ -171,11 +223,21 @@ def main():
         )
         use_poi = True
     else:
-        print(
-            "WARNING: POI data not found. "
-            "Using identity hypergraphs for POI-based hypergraphs."
-        )
+        print("WARNING: POI not found. Using spatial graph instead.")
+    # --------------------------------------------------
+    # BUILD SPATIAL FEATURE FOR OD PAIRS
+    # --------------------------------------------------
+    SPATIAL = np.zeros((V, 4), dtype=np.float32)
 
+    for v, (i, j) in enumerate(valid_od_pairs):
+        SPATIAL[v] = np.concatenate([
+            station_latlon[i],   # origin
+            station_latlon[j]    # destination
+        ])
+    SPATIAL_DIST = np.linalg.norm(
+        SPATIAL[:, None, :] - SPATIAL[None, :, :],
+        axis=-1
+    )
     # --------------------------------------------------
     # 6. HYPEREDGE CONSTRUCTION FUNCTIONS
     # --------------------------------------------------
@@ -219,7 +281,8 @@ def main():
     if use_poi:
         HG3 = build_closest(-POI_DIST, args.k_closest)
     else:
-        HG3 = [[v] for v in range(V)]
+        # HG3 = [[v] for v in range(V)] # identitiy hypergraph
+        HG3 = build_closest(-SPATIAL_DIST, args.k_closest)
 
     # (iv) POI + CLUSTER & SAMPLE
     if use_poi:
@@ -229,7 +292,13 @@ def main():
         ).fit(POI).labels_
         HG4 = cluster_and_sample(cluster_p, args.q_sample)
     else:
-        HG4 = [[v] for v in range(V)]
+        # HG4 = [[v] for v in range(V)] # identity hypergraph
+        cluster_s = KMeans(
+            n_clusters=args.n_cluster_poi,
+            random_state=42
+        ).fit(SPATIAL).labels_
+
+        HG4 = cluster_and_sample(cluster_s, args.q_sample)
 
     # --------------------------------------------------
     # 8. SAVE
