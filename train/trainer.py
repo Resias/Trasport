@@ -1,6 +1,7 @@
 import pytorch_lightning as L
 import torch
 from torch.optim import Adam
+from dataset import build_laplacian
 
 def smape(y_true, y_pred, eps=1e-3):
     denom = (torch.abs(y_true) + torch.abs(y_pred)).clamp(min=eps)
@@ -435,3 +436,88 @@ class STDAMHGNLitModule(L.LightningModule):
     # -------------------------
     def configure_optimizers(self):
         return Adam(self.parameters(), lr=self.lr)
+
+
+class ODformerLM(L.LightningModule):
+    def __init__(self, model, adj_matrix, lr=1e-4):
+        super().__init__()
+        self.model = model
+        self.lr = lr
+        self.loss_fn = torch.nn.MSELoss()
+        L = build_laplacian(adj_matrix)
+        self.register_buffer("L_origin", L)
+        self.register_buffer("L_destination", L.clone())
+
+    def forward(self, X, L_o, L_d):
+        return self.model(X, L_o, L_d)
+
+    # -------------------------
+    # Metrics (paper-style)
+    # -------------------------
+    def _compute_metrics(self, y_true, y_pred):
+        """
+        y_true, y_pred: (B, |V|)
+        """
+        mask = (y_true > 0).float()
+
+        mse = ((y_true - y_pred) ** 2 * mask).sum() / mask.sum()
+        mae = (torch.abs(y_true - y_pred) * mask).sum() / mask.sum()
+
+        denom = torch.clamp(torch.abs(y_true), min=self.mape_eps)
+        mape = (torch.abs((y_true - y_pred) / denom) * mask).sum() / mask.sum() * 100
+
+        smape_ = smape(
+            y_true * mask,
+            y_pred * mask,
+            eps=self.mape_eps
+        )
+        rmse = torch.sqrt(mse)
+
+        return mse, mae, mape, smape_, rmse
+
+    def training_step(self, batch, batch_idx):
+        """
+        batch:
+            X: (B, T_in, N, N, F)
+            Y: (B, T_out, N, N, F)
+        """
+        X = batch["X"]
+        Y = batch["Y"]
+
+        preds = self.model(X, self.L_origin, self.L_destination)
+        loss = self.loss_fn(preds, Y)
+
+        self.log("train/loss", loss, prog_bar=True)
+        return loss
+
+    def validation_step(self, batch, batch_idx):
+        X = batch["X"]
+        Y = batch["Y"]
+
+        preds = self.model(X, self.L_origin, self.L_destination)
+        loss = self.loss_fn(preds, Y)
+
+        mse, mae, mape, smape_, rmse = self._compute_metrics(
+            Y, preds
+        )
+
+        self.log("val_mse", mse, prog_bar=True)
+        self.log("val_mae", mae, prog_bar=True)
+        self.log("val_mape", mape, prog_bar=True)
+        self.log("val_smape", smape_, prog_bar=True)
+        self.log("val_rmse", rmse, prog_bar=True)
+        self.log("val/loss", loss, prog_bar=True)
+        return loss
+
+    def configure_optimizers(self):
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode="min", factor=0.5, patience=10
+        )
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "monitor": "val/loss"
+            }
+        }

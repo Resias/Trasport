@@ -87,6 +87,18 @@ def weekday_onehot(weekday):
     return torch.tensor(onehot, dtype=torch.float32)  # (7,)
 
 
+def build_laplacian(adj: np.ndarray):
+    """
+    adj: (N, N)
+    return: normalized Laplacian (N, N)
+    """
+    A = adj.astype(np.float32)
+    D = np.diag(A.sum(axis=1))
+    D_inv_sqrt = np.linalg.inv(np.sqrt(D + 1e-6))
+    L = np.eye(A.shape[0]) - D_inv_sqrt @ A @ D_inv_sqrt
+    return torch.tensor(L, dtype=torch.float32)
+
+
 # ==========================================
 # Spatial Correlation Selector (User Logic Integrated)
 # ==========================================
@@ -627,7 +639,7 @@ class MetroODHyperDataset(Dataset):
 
         # ---------- build index ----------
         self.index = []
-        for day_idx, file_name in enumerate(file_names):
+        for day_idx, file_name in tqdm(enumerate(file_names), desc="Building MetroODHyperDataset index"):
             ymd = file_name.split('_')[-1].split('.')[0]
             date = datetime.date(int(ymd[:4]), int(ymd[4:6]), int(ymd[6:8]))
 
@@ -700,6 +712,142 @@ class MetroODHyperDataset(Dataset):
             "periodicity": periodicity, # (n, |V|)
             "y": y,                     # (|V|)
             "weekday": torch.tensor(info["weekday"])
+        }
+
+class ODFormerMetroDataset(Dataset):
+    """
+    ODformer 전용 지하철 OD Dataset
+
+    Output:
+        X: (T_in, N, N, F)
+        Y: (T_out, N, N, F)
+    """
+
+    def __init__(
+        self,
+        data_root,
+        window_size,
+        pred_size,
+        hop_size,
+        use_time_feature=True,
+        cache_in_mem=True,
+        clip_value=None,
+        is_train=True
+    ):
+        super().__init__()
+
+        self.data_root = data_root
+        self.window_size = window_size
+        self.pred_size = pred_size
+        self.hop_size = hop_size
+        self.use_time_feature = use_time_feature
+        self.cache_mem = cache_in_mem
+
+        # 시간 범위
+        self.day_start = 5 * 60 + 30
+        self.day_end = 24 * 60
+
+        # 파일 로드
+        file_names = sorted(os.listdir(data_root))
+        self.data_paths = [os.path.join(data_root, f) for f in file_names]
+
+        self.day_cache = []
+        for p in tqdm(self.data_paths, desc="Caching OD matrices"):
+            arr = np.load(p)  # (1440, N, N)
+            if cache_in_mem:
+                self.day_cache.append(torch.tensor(arr, dtype=torch.float32))
+            else:
+                self.day_cache.append(arr)
+
+        # =========================
+        # 98% clipping 기준 설정
+        # =========================
+        if clip_value is None:
+            if not is_train:
+                raise ValueError("clip_value must be provided for val/test dataset")
+
+            # trainset: clip_value 계산
+            all_vals = []
+            for day in self.day_cache:
+                if isinstance(day, torch.Tensor):
+                    all_vals.append(day.reshape(-1))
+                else:
+                    all_vals.append(torch.from_numpy(day.reshape(-1)))
+            all_vals = torch.cat(all_vals)
+            self.clip_value = torch.quantile(all_vals, 0.98)
+        else:
+            # val/test: train clip_value 재사용
+            self.clip_value = clip_value
+
+        # sliding window index
+        self.indices = []
+        for f_idx, fname in enumerate(file_names):
+            ymd = fname.split('_')[-1].split('.')[0]
+            date = datetime.date(int(ymd[:4]), int(ymd[4:6]), int(ymd[6:8]))
+            weekday = date.weekday()
+
+            for s in range(
+                self.day_start,
+                self.day_end - (window_size + pred_size),
+                hop_size
+            ):
+                self.indices.append((f_idx, s, weekday))
+
+    def __len__(self):
+        return len(self.indices)
+
+    def _build_feature(self, od, minute_idx):
+        """
+        od: (T, N, N)
+        return: (T, N, N, F)
+        """
+        T, N, _ = od.shape
+
+        # ===== 논문 전처리 =====
+        od = torch.clamp(od, max=self.clip_value)
+        od = torch.log1p(od)
+        # =====================
+
+        feats = [od.unsqueeze(-1)]  # flow feature
+
+        if self.use_time_feature:
+            minute = torch.tensor(minute_idx) % 1440
+            time_enc = build_time_sin_cos(minute.numpy())
+            time_enc = torch.tensor(time_enc, dtype=torch.float32)
+            time_enc = time_enc.view(T, 1, 1, -1).expand(T, N, N, -1)
+            feats.append(time_enc)
+
+        return torch.cat(feats, dim=-1)
+
+    def __getitem__(self, idx):
+        f_idx, start, weekday = self.indices[idx]
+        day_data = self.day_cache[f_idx]
+
+        if self.cache_mem:
+            x_raw = day_data[start:start+self.window_size]
+            y_raw = day_data[start+self.window_size:
+                             start+self.window_size+self.pred_size]
+        else:
+            x_raw = torch.from_numpy(
+                day_data[start:start+self.window_size].copy()
+            ).float()
+            y_raw = torch.from_numpy(
+                day_data[start+self.window_size:
+                         start+self.window_size+self.pred_size].copy()
+            ).float()
+
+        hist_minutes = torch.arange(start, start+self.window_size)
+        fut_minutes = torch.arange(
+            start+self.window_size,
+            start+self.window_size+self.pred_size
+        )
+
+        X = self._build_feature(x_raw, hist_minutes)
+        Y = self._build_feature(y_raw, fut_minutes)
+        return {
+            "X": X,
+            "Y": Y,
+            "weekday": torch.tensor(weekday),
         }
 
 
@@ -858,6 +1006,53 @@ def get_stdamhgn_dataset(
     )
 
     return trainset, valset
+
+def get_odformer_dataset(
+    data_root,
+    train_subdir,
+    val_subdir,
+    window_size,
+    hop_size,
+    pred_size,
+    use_time_feature=True,
+    cache_in_mem=True
+):
+    """
+    ODformer 학습용 dataset 생성 함수
+
+    Returns:
+        trainset, valset
+    """
+
+    train_path = os.path.join(data_root, train_subdir)
+    val_path   = os.path.join(data_root, val_subdir)
+
+    # ---- trainset ----
+    trainset = ODFormerMetroDataset(
+        data_root=train_path,
+        window_size=window_size,
+        pred_size=pred_size,
+        hop_size=hop_size,
+        use_time_feature=use_time_feature,
+        cache_in_mem=cache_in_mem,
+        clip_value=None,
+        is_train=True
+    )
+
+    # ---- valset (train clip_value 재사용) ----
+    valset = ODFormerMetroDataset(
+        data_root=val_path,
+        window_size=window_size,
+        pred_size=pred_size,
+        hop_size=hop_size,
+        use_time_feature=use_time_feature,
+        cache_in_mem=cache_in_mem,
+        clip_value=trainset.clip_value,
+        is_train=False
+    )
+
+    return trainset, valset
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
