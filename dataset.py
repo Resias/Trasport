@@ -225,60 +225,194 @@ class SpatialCorrelationSelector:
         return neighbors
 
 
+# class MetroDataset(Dataset):
+#     """
+#     지하철 OD 데이터셋
+
+#     - data_root: 하루 단위 .npy 파일들이 있는 디렉토리
+#         각 파일: [1440, N, N] (분단위, 1분 1스텝, 00:00 ~ 24:00)
+#     - window_size: 입력 시퀀스 길이 (분 단위)
+#     - hop_size: 슬라이딩 윈도우 이동 간격 (분 단위)
+#     - pred_size: 예측 시퀀스 길이 (분 단위)
+    
+#     운영시간만 사용: 05:30(=330분) ~ 24:00(=1440분)
+#     """
+
+#     def __init__(self, data_root, window_size, hop_size, pred_size, cache_in_mem=True):
+#         super().__init__()
+
+#         self.data_root = data_root
+#         self.window_size = window_size
+#         self.hop_size = hop_size
+#         self.pred_size = pred_size
+#         self.cache_mem = cache_in_mem
+
+#         # 하루 중 사용할 구간 (분)
+#         self.day_start_minute = 5 * 60 + 30  # 05:30 -> 330
+#         self.day_end_minute = 24 * 60        # 24:00 -> 1440
+
+#         # 파일들을 날짜 순으로 정렬
+#         file_names = sorted(os.listdir(data_root))
+#         self.data_paths = [os.path.join(data_root, f) for f in file_names]
+
+#         # ---- 2) 파일 전체 로드 (메모리 캐싱) ----
+#         print("Caching OD matrices into memory...")
+#         self.day_data_cache = []
+#         for path in tqdm(self.data_paths):
+#             arr = np.load(path, mmap_mode='r')  # shape: [1440, N, N]
+#             if not cache_in_mem:
+#                 self.day_data_cache.append(arr)
+#             else:
+#                 self.day_data_cache.append(torch.tensor(arr, dtype=torch.float32))
+            
+#         print("Caching completed.")
+        
+#         # ---- 3) sliding window 정보 생성 ----
+#         self.info_list = []
+#         for file_idx, file_name in enumerate(file_names):
+#             # 파일명에서 날짜 추출 (예: something_YYYYMMDD.npy)
+#             ymd = file_name.split('_')[-1].split('.')[0]
+#             date = datetime.date(int(ymd[0:4]), int(ymd[4:6]), int(ymd[6:8]))
+#             weekday = date.weekday()  # 0=월, 6=일
+
+#             for start_idx in range(self.day_start_minute, self.day_end_minute-(self.pred_size+self.window_size), hop_size):
+#                 self.info_list.append({
+#                     "file_idx": file_idx,
+#                     "start_idx": start_idx,
+#                     "weekday": weekday,
+#                 })
+
+#     def __len__(self):
+#         return len(self.info_list)
+
+#     def __getitem__(self, index):
+#         info = self.info_list[index]
+#         file_idx = info["file_idx"]
+#         start_idx = info["start_idx"]
+#         weekday = info["weekday"]
+
+#         # -------- Memory Cache에서 바로 가져오기 ----------
+#         day_data = self.day_data_cache[file_idx]  # (1440, N, N)
+        
+#         # slicing
+#         if self.cache_mem:
+#             x_tensor = day_data[start_idx:start_idx+self.window_size]
+#             y_tensor = day_data[start_idx+self.window_size:
+#                                 start_idx+self.window_size+self.pred_size]
+#         else:
+#             x_numpy = day_data[start_idx:start_idx+self.window_size].copy()
+#             y_numpy = day_data[start_idx+self.window_size:
+#                                 start_idx+self.window_size+self.pred_size].copy()
+#             x_tensor = torch.from_numpy(x_numpy).float()
+#             y_tensor = torch.from_numpy(y_numpy).float()
+
+#         # time encoding
+#         hist_minutes = torch.arange(start_idx, start_idx+self.window_size) % 1440
+#         fut_minutes = torch.arange(start_idx+self.window_size,
+#                                    start_idx+self.window_size+self.pred_size) % 1440
+
+#         time_enc_hist = build_time_sin_cos(hist_minutes.numpy())
+#         time_enc_fut = build_time_sin_cos(fut_minutes.numpy())
+
+#         return {
+#             "x_tensor": x_tensor,      # (T_in, N, N)
+#             "y_tensor": y_tensor,
+#             "weekday_tensor": torch.tensor(weekday),
+#             "time_enc_hist": time_enc_hist,
+#             "time_enc_fut": time_enc_fut
+#         }
 class MetroDataset(Dataset):
     """
-    지하철 OD 데이터셋
+    Metro OD Dataset (resolution-agnostic)
 
-    - data_root: 하루 단위 .npy 파일들이 있는 디렉토리
-        각 파일: [1440, N, N] (분단위, 1분 1스텝, 00:00 ~ 24:00)
-    - window_size: 입력 시퀀스 길이 (분 단위)
-    - hop_size: 슬라이딩 윈도우 이동 간격 (분 단위)
-    - pred_size: 예측 시퀀스 길이 (분 단위)
-    
-    운영시간만 사용: 05:30(=330분) ~ 24:00(=1440분)
+    - data_root: 하루 단위 .npy 파일 디렉토리
+        each file: (T_day, N, N)
+    - window_size, hop_size, pred_size: step 단위
+    - time_resolution: minutes per step (1 or 10)
     """
 
-    def __init__(self, data_root, window_size, hop_size, pred_size, cache_in_mem=True):
+    def __init__(
+        self,
+        data_root,
+        window_size,
+        hop_size,
+        pred_size,
+        time_resolution=1,
+        cache_in_mem=True,
+    ):
         super().__init__()
 
         self.data_root = data_root
         self.window_size = window_size
         self.hop_size = hop_size
         self.pred_size = pred_size
+        self.time_resolution = time_resolution
         self.cache_mem = cache_in_mem
 
-        # 하루 중 사용할 구간 (분)
-        self.day_start_minute = 5 * 60 + 30  # 05:30 -> 330
-        self.day_end_minute = 24 * 60        # 24:00 -> 1440
+        # 운영시간 (분 → step)
+        self.day_start_minute = 5 * 60 + 30  # 330
+        self.day_end_minute = 24 * 60        # 1440
 
-        # 파일들을 날짜 순으로 정렬
+        self.day_start_step = self.day_start_minute // time_resolution
+        self.day_end_step = self.day_end_minute // time_resolution
+
+        # 파일 목록
         file_names = sorted(os.listdir(data_root))
         self.data_paths = [os.path.join(data_root, f) for f in file_names]
 
-        # ---- 2) 파일 전체 로드 (메모리 캐싱) ----
-        print("Caching OD matrices into memory...")
+        # ---- load data ----
         self.day_data_cache = []
-        for path in tqdm(self.data_paths):
-            arr = np.load(path, mmap_mode='r')  # shape: [1440, N, N]
-            if not cache_in_mem:
-                self.day_data_cache.append(arr)
-            else:
-                self.day_data_cache.append(torch.tensor(arr, dtype=torch.float32))
-            
-        print("Caching completed.")
-        
-        # ---- 3) sliding window 정보 생성 ----
-        self.info_list = []
-        for file_idx, file_name in enumerate(file_names):
-            # 파일명에서 날짜 추출 (예: something_YYYYMMDD.npy)
-            ymd = file_name.split('_')[-1].split('.')[0]
-            date = datetime.date(int(ymd[0:4]), int(ymd[4:6]), int(ymd[6:8]))
-            weekday = date.weekday()  # 0=월, 6=일
+        self.valid_masks = []
 
-            for start_idx in range(self.day_start_minute, self.day_end_minute-(self.pred_size+self.window_size), hop_size):
+        print("Caching OD matrices...")
+        for path in tqdm(self.data_paths):
+            arr = np.load(path)  # (T_day, N, N)
+
+            mask_path = path.replace(".npy", ".mask.npy")
+            if os.path.exists(mask_path):
+                mask = np.load(mask_path)
+            else:
+                mask = np.ones(arr.shape[0], dtype=bool)
+
+            if cache_in_mem:
+                self.day_data_cache.append(
+                    torch.tensor(arr, dtype=torch.float32)
+                )
+            else:
+                self.day_data_cache.append(arr)
+
+            self.valid_masks.append(mask)
+
+        print("Caching completed.")
+
+        # ---- build sliding windows ----
+        self.info_list = []
+
+        for file_idx, file_name in enumerate(file_names):
+            ymd = file_name.split('_')[-1].split('.')[0]
+            date = datetime.date(
+                int(ymd[0:4]), int(ymd[4:6]), int(ymd[6:8])
+            )
+            weekday = date.weekday()
+
+            T_day = self.day_data_cache[file_idx].shape[0]
+            valid_mask = self.valid_masks[file_idx]
+
+            start_s = max(0, self.day_start_step)
+            end_s = min(
+                T_day,
+                self.day_end_step - (self.window_size + self.pred_size)
+            )
+
+            for start_step in range(start_s, end_s, self.hop_size):
+                end_step = start_step + self.window_size + self.pred_size
+
+                if not valid_mask[start_step:end_step].all():
+                    continue
+
                 self.info_list.append({
                     "file_idx": file_idx,
-                    "start_idx": start_idx,
+                    "start_step": start_step,
                     "weekday": weekday,
                 })
 
@@ -288,39 +422,56 @@ class MetroDataset(Dataset):
     def __getitem__(self, index):
         info = self.info_list[index]
         file_idx = info["file_idx"]
-        start_idx = info["start_idx"]
+        s = info["start_step"]
         weekday = info["weekday"]
 
-        # -------- Memory Cache에서 바로 가져오기 ----------
-        day_data = self.day_data_cache[file_idx]  # (1440, N, N)
-        
-        # slicing
-        if self.cache_mem:
-            x_tensor = day_data[start_idx:start_idx+self.window_size]
-            y_tensor = day_data[start_idx+self.window_size:
-                                start_idx+self.window_size+self.pred_size]
-        else:
-            x_numpy = day_data[start_idx:start_idx+self.window_size].copy()
-            y_numpy = day_data[start_idx+self.window_size:
-                                start_idx+self.window_size+self.pred_size].copy()
-            x_tensor = torch.from_numpy(x_numpy).float()
-            y_tensor = torch.from_numpy(y_numpy).float()
+        day_data = self.day_data_cache[file_idx]
 
-        # time encoding
-        hist_minutes = torch.arange(start_idx, start_idx+self.window_size) % 1440
-        fut_minutes = torch.arange(start_idx+self.window_size,
-                                   start_idx+self.window_size+self.pred_size) % 1440
+        x = day_data[s : s + self.window_size]
+        y = day_data[s + self.window_size :
+                     s + self.window_size + self.pred_size]
+
+        # ---- time encoding (real minutes) ----
+        hist_minutes = (
+            torch.arange(self.window_size)
+            * self.time_resolution
+            + s * self.time_resolution
+        ) % 1440
+
+        fut_minutes = (
+            torch.arange(self.pred_size)
+            * self.time_resolution
+            + (s + self.window_size) * self.time_resolution
+        ) % 1440
 
         time_enc_hist = build_time_sin_cos(hist_minutes.numpy())
         time_enc_fut = build_time_sin_cos(fut_minutes.numpy())
 
         return {
-            "x_tensor": x_tensor,      # (T_in, N, N)
-            "y_tensor": y_tensor,
+            "x_tensor": x,           # (T_in, N, N)
+            "y_tensor": y,           # (T_out, N, N)
             "weekday_tensor": torch.tensor(weekday),
             "time_enc_hist": time_enc_hist,
-            "time_enc_fut": time_enc_fut
+            "time_enc_fut": time_enc_fut,
         }
+
+# dataset = MetroDataset(
+#     data_root="od_daily_1min",
+#     window_size=60,
+#     hop_size=5,
+#     pred_size=30,
+#     time_resolution=1,
+# )
+
+# dataset = MetroDataset(
+#     data_root="od_daily_10min",
+#     window_size=6,    # 60분
+#     hop_size=1,       # 10분
+#     pred_size=3,      # 30분
+#     time_resolution=10,
+# )
+
+
 
 
 # ==========================================
