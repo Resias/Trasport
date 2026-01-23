@@ -34,7 +34,13 @@ class HyperSageLayer(nn.Module):
 
         for e in hyperedges:
             e = self._sample_hyperedge(e, self.Q)
+
             e = torch.tensor(e, device=device)
+            e = e[(e >= 0) & (e < V)]     # ★ 핵심 수정 (논문 의미 유지)
+
+            if e.numel() == 0:
+                continue
+
             agg = X[:, e, :].mean(dim=1)
             X_out[:, e, :] += agg.unsqueeze(1)
             deg[e] += 1

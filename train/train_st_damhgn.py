@@ -4,6 +4,8 @@ import torch
 import pytorch_lightning as L
 from torch.utils.data import DataLoader
 from pytorch_lightning.loggers import WandbLogger
+from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
+
 
 import sys
 import os
@@ -40,7 +42,7 @@ def parse_args():
     # Training
     # -------------------------
     parser.add_argument("--batch_size", type=int, default=128)
-    parser.add_argument("--num_workers", type=int, default=4)
+    parser.add_argument("--num_workers", type=int, default=2)
     parser.add_argument("--lr", type=float, default=7.5e-4)
     parser.add_argument("--max_epochs", type=int, default=200)
 
@@ -128,13 +130,27 @@ def main():
     wandb_logger.experiment.config.update(vars(args))
     L.seed_everything(42, workers=True)
 
+    callbacks = [
+        EarlyStopping(
+            monitor="val_loss",
+            patience=25,
+            min_delta=1e-4,
+            mode="min"
+        ),
+        ModelCheckpoint(
+            monitor="val_loss",
+            save_top_k=1,
+            mode="min"
+        )
+    ]
+
     trainer = L.Trainer(
         accelerator=DEVICE,
         devices=1,
-        precision=16,
-        max_epochs=args.max_epochs,
+        precision=32,
+        max_epochs=200,
+        callbacks=callbacks,
         logger=wandb_logger,
-        log_every_n_steps=50
     )
 
     trainer.fit(lightning_module, train_loader, val_loader)
