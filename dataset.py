@@ -321,14 +321,17 @@ class SpatialCorrelationSelector:
 #             "time_enc_hist": time_enc_hist,
 #             "time_enc_fut": time_enc_fut
 #         }
+
 class MetroDataset(Dataset):
     """
-    Metro OD Dataset (resolution-agnostic)
+    Metro OD Dataset (resolution-aware)
 
     - data_root: 하루 단위 .npy 파일 디렉토리
         each file: (T_day, N, N)
     - window_size, hop_size, pred_size: step 단위
-    - time_resolution: minutes per step (1 or 10)
+    - time_resolution: minutes per step
+        * MetroFlow: 10
+        * MTA: 60
     """
 
     def __init__(
@@ -337,7 +340,7 @@ class MetroDataset(Dataset):
         window_size,
         hop_size,
         pred_size,
-        time_resolution=1,
+        time_resolution,
         cache_in_mem=True,
     ):
         super().__init__()
@@ -349,18 +352,37 @@ class MetroDataset(Dataset):
         self.time_resolution = time_resolution
         self.cache_mem = cache_in_mem
 
-        # 운영시간 (분 → step)
-        self.day_start_minute = 5 * 60 + 30  # 330
-        self.day_end_minute = 24 * 60        # 1440
+        # -------------------------
+        # 운영시간 설정
+        # -------------------------
+        # MetroFlow만 운영시간 컷 적용
+        self.use_operating_hours = (time_resolution < 60)
 
-        self.day_start_step = self.day_start_minute // time_resolution
-        self.day_end_step = self.day_end_minute // time_resolution
+        self.day_start_minute = 5 * 60 + 30  # 05:30
+        self.day_end_minute = 24 * 60        # 24:00
 
-        # 파일 목록
-        file_names = sorted(os.listdir(data_root))
+        if self.use_operating_hours:
+            self.day_start_step = self.day_start_minute // time_resolution
+            self.day_end_step = self.day_end_minute // time_resolution
+        else:
+            self.day_start_step = 0
+            self.day_end_step = None  # full day
+
+        # -------------------------
+        # 파일 목록 (순수 OD만)
+        # -------------------------
+        file_names = sorted(
+            f for f in os.listdir(data_root)
+            if f.endswith(".npy")
+            and not f.endswith(".time.npy")
+            and not f.endswith(".mask.npy")
+        )
+        self.file_names = file_names
         self.data_paths = [os.path.join(data_root, f) for f in file_names]
 
-        # ---- load data ----
+        # -------------------------
+        # Load daily OD matrices
+        # -------------------------
         self.day_data_cache = []
         self.valid_masks = []
 
@@ -385,11 +407,13 @@ class MetroDataset(Dataset):
 
         print("Caching completed.")
 
-        # ---- build sliding windows ----
+        # -------------------------
+        # Build sliding windows
+        # -------------------------
         self.info_list = []
 
-        for file_idx, file_name in enumerate(file_names):
-            ymd = file_name.split('_')[-1].split('.')[0]
+        for file_idx, file_name in enumerate(self.file_names):
+            ymd = file_name.split(".")[0]
             date = datetime.date(
                 int(ymd[0:4]), int(ymd[4:6]), int(ymd[6:8])
             )
@@ -398,10 +422,11 @@ class MetroDataset(Dataset):
             T_day = self.day_data_cache[file_idx].shape[0]
             valid_mask = self.valid_masks[file_idx]
 
-            start_s = max(0, self.day_start_step)
+            start_s = self.day_start_step
+            end_limit = T_day if self.day_end_step is None else self.day_end_step
             end_s = min(
-                T_day,
-                self.day_end_step - (self.window_size + self.pred_size)
+                end_limit,
+                T_day - (self.window_size + self.pred_size)
             )
 
             for start_step in range(start_s, end_s, self.hop_size):
@@ -416,6 +441,8 @@ class MetroDataset(Dataset):
                     "weekday": weekday,
                 })
 
+        print(f"Total samples: {len(self.info_list)}")
+
     def __len__(self):
         return len(self.info_list)
 
@@ -428,10 +455,14 @@ class MetroDataset(Dataset):
         day_data = self.day_data_cache[file_idx]
 
         x = day_data[s : s + self.window_size]
-        y = day_data[s + self.window_size :
-                     s + self.window_size + self.pred_size]
+        y = day_data[
+            s + self.window_size :
+            s + self.window_size + self.pred_size
+        ]
 
-        # ---- time encoding (real minutes) ----
+        # -------------------------
+        # Time encoding (real minutes)
+        # -------------------------
         hist_minutes = (
             torch.arange(self.window_size)
             * self.time_resolution
@@ -448,12 +479,13 @@ class MetroDataset(Dataset):
         time_enc_fut = build_time_sin_cos(fut_minutes.numpy())
 
         return {
-            "x_tensor": x,           # (T_in, N, N)
-            "y_tensor": y,           # (T_out, N, N)
-            "weekday_tensor": torch.tensor(weekday),
+            "x_tensor": x,                      # (T_in, N, N)
+            "y_tensor": y,                      # (T_out, N, N)
+            "weekday_tensor": torch.tensor(weekday, dtype=torch.long),
             "time_enc_hist": time_enc_hist,
             "time_enc_fut": time_enc_fut,
         }
+
 
 # dataset = MetroDataset(
 #     data_root="od_daily_1min",
