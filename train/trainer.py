@@ -429,7 +429,7 @@ class STDAMHGNLitModule(L.LightningModule):
         self.log("val_rmse", rmse, prog_bar=True)
         self.log("val_loss", loss, prog_bar=True)
 
-        return mse
+        return loss
 
     # -------------------------
     # Optimizer
