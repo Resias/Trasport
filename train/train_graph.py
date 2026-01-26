@@ -27,6 +27,7 @@ def main():
     parser.add_argument("--val_subdir", default="test")
     parser.add_argument("--cache_dataset", action="store_true")
     parser.add_argument("--od_csv", default="./AD_matrix_trimmed_common.csv")
+    parser.add_argument("--station_latlon_csv", type=str, default=None, help="CSV file with columns: station_ad, lat, lon")
     parser.add_argument("--window_size", type=int, default=60)
     parser.add_argument("--pred_size", type=int, default=30)
     parser.add_argument("--hop_size", type=int, default=10)
@@ -49,6 +50,36 @@ def main():
     od_df = pd.read_csv(args.od_csv, index_col=0)
     adj = torch.tensor(od_df.values, dtype=torch.float32)
     static_edge_index, _ = dense_to_sparse(adj)
+
+    # =====================
+    # Load station lat/lon (optional)
+    # =====================
+    node_latlon = None
+
+    if args.station_latlon_csv is not None:
+        id_map = pd.read_csv("station_id_map.csv")  # station_ad, node_id
+
+        latlon_df = latlon_df.merge(id_map, on="station_ad")
+        latlon_df = latlon_df.sort_values("node_id")
+
+        latlon = torch.tensor(
+            latlon_df[["lat", "lon"]].values,
+            dtype=torch.float32
+        )
+        latlon_df = pd.read_csv(args.station_latlon_csv)
+
+        # 반드시 이 순서 확인:
+        # static_edge_index의 노드 index ↔ latlon row index
+        # 지금 구조에서는 "행 순서 = node id" 라고 가정
+        latlon = latlon_df[["lat", "lon"]].values
+        latlon = torch.tensor(latlon, dtype=torch.float32)
+
+        # ---- normalization (필수) ----
+        latlon_min = latlon.min(dim=0, keepdim=True)[0]
+        latlon_max = latlon.max(dim=0, keepdim=True)[0]
+        latlon = (latlon - latlon_min) / (latlon_max - latlon_min + 1e-6)
+
+        node_latlon = latlon
 
     # =====================
     # Dataset
@@ -92,7 +123,8 @@ def main():
             heads=args.gat_heads,
             gat_hid_dim=args.gat_hidden,
             num_future_steps=args.pred_size,
-            decode_num_layers=args.decode_num_layers
+            decode_num_layers=args.decode_num_layers,
+            node_latlon=node_latlon
         )
 
         model.static_edge_index = static_edge_index
@@ -121,7 +153,8 @@ def main():
             node_feat_dim=args.node_feat_dim,
             gat_hid_dim=args.gat_hidden,
             num_future_steps=args.pred_size,
-            decode_num_layers=args.decode_num_layers
+            decode_num_layers=args.decode_num_layers,
+            node_latlon=node_latlon
         )
 
         model.static_edge_index = static_edge_index
