@@ -1,6 +1,7 @@
 # train/train_graph.py
 import argparse
 import datetime
+import json
 import torch
 import pandas as pd
 from torch.utils.data import DataLoader
@@ -27,7 +28,8 @@ def main():
     parser.add_argument("--val_subdir", default="test")
     parser.add_argument("--cache_dataset", action="store_true")
     parser.add_argument("--od_csv", default="./AD_matrix_trimmed_common.csv")
-    parser.add_argument("--station_latlon_csv", type=str, default=None, help="CSV file with columns: station_ad, lat, lon")
+    parser.add_argument("--station_latlon_csv", type=str, default="./ad_station_latlon.csv", help="CSV file with columns: station_ad, lat, lon")
+    parser.add_argument("--time_resolution", type=int, default=1)
     parser.add_argument("--window_size", type=int, default=60)
     parser.add_argument("--pred_size", type=int, default=30)
     parser.add_argument("--hop_size", type=int, default=10)
@@ -41,7 +43,7 @@ def main():
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--max_epochs", type=int, default=200)
     parser.add_argument("--gat_hidden", type=int, default=64)
-    parser.add_argument("--wandb_project", default="metro-gnn-od")
+    parser.add_argument("--wandb_project", default="GATrasformer-od-week-latlon")
     args = parser.parse_args()
 
     # =====================
@@ -52,35 +54,73 @@ def main():
     static_edge_index, _ = dense_to_sparse(adj)
 
     # =====================
-    # Load station lat/lon (optional)
+    # Load station lat/lon (JSON mapping)
     # =====================
     node_latlon = None
 
     if args.station_latlon_csv is not None:
-        id_map = pd.read_csv("station_id_map.csv")  # station_ad, node_id
+        # lat/lon CSV
+        latlon_raw = pd.read_csv(args.station_latlon_csv)  # station_ad, lat, lon
 
-        latlon_df = latlon_df.merge(id_map, on="station_ad")
+        # station -> idx json
+        with open("station_to_idx.json", "r", encoding="utf-8") as f:
+            station_to_idx = json.load(f)
+
+
+        # ---- 핵심: full node frame 생성 ----
+        full_nodes = pd.DataFrame({
+            "station_ad": list(station_to_idx.keys()),
+            "node_id": list(station_to_idx.values())
+        })
+
+        # lat/lon left merge (없는 역도 row 생성됨)
+        latlon_df = full_nodes.merge(latlon_raw, on="station_ad", how="left")
+        # adjacency numpy (이미 od_df 있음)
+        adj_np = od_df.values
+
+        # missing lat/lon 처리
+        missing = latlon_df[latlon_df["lat"].isna() | latlon_df["lon"].isna()]
+
+        if len(missing) > 0:
+            print(f"Filling {len(missing)} missing station(s) by neighbor mean")
+
+            for _, row in missing.iterrows():
+                nid = int(row["node_id"])
+
+                neighbors = (adj_np[nid] > 0).nonzero()[0]
+
+                assert len(neighbors) > 0, f"No neighbors for node {nid}"
+
+                neigh_latlon = latlon_df.iloc[neighbors][["lat", "lon"]].values
+
+                mean_lat = neigh_latlon[:, 0].mean()
+                mean_lon = neigh_latlon[:, 1].mean()
+
+                latlon_df.loc[latlon_df["node_id"] == nid, "lat"] = mean_lat
+                latlon_df.loc[latlon_df["node_id"] == nid, "lon"] = mean_lon
+
+                print(f"Filled node {nid} using {len(neighbors)} neighbors")
+
+        # sanity
+        assert latlon_df["node_id"].isnull().sum() == 0
+        assert latlon_df["lat"].isnull().sum() == 0
+        assert latlon_df["lon"].isnull().sum() == 0
+
+        # idx 기준 정렬
         latlon_df = latlon_df.sort_values("node_id")
 
         latlon = torch.tensor(
             latlon_df[["lat", "lon"]].values,
             dtype=torch.float32
         )
-        latlon_df = pd.read_csv(args.station_latlon_csv)
 
-        # 반드시 이 순서 확인:
-        # static_edge_index의 노드 index ↔ latlon row index
-        # 지금 구조에서는 "행 순서 = node id" 라고 가정
-        latlon = latlon_df[["lat", "lon"]].values
-        latlon = torch.tensor(latlon, dtype=torch.float32)
-
-        # ---- normalization (필수) ----
+        # normalization
         latlon_min = latlon.min(dim=0, keepdim=True)[0]
         latlon_max = latlon.max(dim=0, keepdim=True)[0]
         latlon = (latlon - latlon_min) / (latlon_max - latlon_min + 1e-6)
 
         node_latlon = latlon
-
+    
     # =====================
     # Dataset
     # =====================
@@ -91,6 +131,7 @@ def main():
         window_size=args.window_size,
         hop_size=args.hop_size,
         pred_size=args.pred_size,
+        time_resolution=args.time_resolution,
         cache_in_mem=True if args.cache_dataset else False
     )
 
@@ -134,7 +175,7 @@ def main():
             batch_size=args.batch_size,
             shuffle=True,
             num_workers=args.num_workers,
-            persistent_workers=True,
+            persistent_workers=False,
             collate_fn=lambda batch: graph_week_collate_fn(batch, static_edge_index),
             pin_memory=True,
         )
@@ -142,7 +183,7 @@ def main():
             valset,
             batch_size=args.batch_size,
             shuffle=False,
-            persistent_workers=True,
+            persistent_workers=False,
             num_workers=args.num_workers,
             collate_fn=lambda batch: graph_week_collate_fn(batch, static_edge_index),
             pin_memory=True,
