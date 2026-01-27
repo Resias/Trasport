@@ -1,5 +1,6 @@
 # dataset.py
 import os
+import re
 import datetime
 import argparse
 import numpy as np
@@ -388,7 +389,7 @@ class MetroDataset(Dataset):
 
         print("Caching OD matrices...")
         for path in tqdm(self.data_paths):
-            arr = np.load(path)  # (T_day, N, N)
+            arr = np.load(path, mmap_mode='r')  # (T_day, N, N)
 
             mask_path = path.replace(".npy", ".mask.npy")
             if os.path.exists(mask_path):
@@ -413,9 +414,17 @@ class MetroDataset(Dataset):
         self.info_list = []
 
         for file_idx, file_name in enumerate(self.file_names):
-            ymd = file_name.split(".")[0]
+            stem = file_name.split(".")[0]
+            
+            m = re.search(r"(\d{8})", stem)
+            assert m is not None, f"Cannot parse date from filename: {file_name}"
+
+            ymd = m.group(1)
+
             date = datetime.date(
-                int(ymd[0:4]), int(ymd[4:6]), int(ymd[6:8])
+                int(ymd[0:4]),
+                int(ymd[4:6]),
+                int(ymd[6:8])
             )
             weekday = date.weekday()
 
@@ -454,11 +463,18 @@ class MetroDataset(Dataset):
 
         day_data = self.day_data_cache[file_idx]
 
-        x = day_data[s : s + self.window_size]
-        y = day_data[
-            s + self.window_size :
-            s + self.window_size + self.pred_size
-        ]
+        x = torch.as_tensor(
+            day_data[s : s + self.window_size],
+            dtype=torch.float32
+        )
+
+        y = torch.as_tensor(
+            day_data[
+                s + self.window_size :
+                s + self.window_size + self.pred_size
+            ],
+            dtype=torch.float32
+        )
 
         # -------------------------
         # Time encoding (real minutes)
@@ -936,10 +952,11 @@ class ODFormerMetroDataset(Dataset):
 
         self.day_cache = []
         for p in tqdm(self.data_paths, desc="Caching OD matrices"):
-            arr = np.load(p)  # (1440, N, N)
             if cache_in_mem:
+                arr = np.load(p)  # (1440, N, N)
                 self.day_cache.append(torch.tensor(arr, dtype=torch.float32))
             else:
+                arr = np.load(p, mmap_mode='r')  # (1440, N, N)
                 self.day_cache.append(arr)
 
         # =========================
@@ -1043,7 +1060,7 @@ def get_mpgcn_dataset(data_root, train_subdir, val_subdir, window_size, hop_size
     
     return trainset, valset
 
-def get_dataset(data_root, train_subdir, val_subdir, window_size, hop_size, pred_size, cache_in_mem=True):
+def get_dataset(data_root, train_subdir, val_subdir, window_size, hop_size, pred_size, time_resolution,cache_in_mem=True):
     
     # train_pt = os.path.join(data_root, 'train.pt')
     # val_pt = os.path.join(data_root, 'val.pt')
@@ -1063,6 +1080,7 @@ def get_dataset(data_root, train_subdir, val_subdir, window_size, hop_size, pred
         window_size=window_size,
         hop_size=hop_size,
         pred_size=pred_size,
+        time_resolution=time_resolution,
         cache_in_mem=cache_in_mem
     )
     valset = MetroDataset(
@@ -1070,21 +1088,9 @@ def get_dataset(data_root, train_subdir, val_subdir, window_size, hop_size, pred
         window_size=window_size,
         hop_size=hop_size,
         pred_size=pred_size,
+        time_resolution=time_resolution,
         cache_in_mem=cache_in_mem
     )
-    
-    # print('data caching...')
-    # train_list = []
-    # for item in tqdm(trainset):
-    #     train_list.append(item)
-    # train_tensor = torch.tensor(train_list)
-    # val_list = []
-    # for item in tqdm(valset):
-    #     val_list.append(item)
-    # val_tensor = torch.tensor(val_list)
-    
-    # torch.save(train_tensor, train_pt)
-    # torch.save(val_tensor, val_pt)
     
     return trainset, valset
 
