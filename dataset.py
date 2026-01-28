@@ -139,7 +139,6 @@ def compute_clip_value(
 # ==========================================
 # Spatial Correlation Selector (User Logic Integrated)
 # ==========================================
-
 class SpatialCorrelationSelector:
     def __init__(self, data_root, train_subdir, dist_matrix, top_k=3):
         """
@@ -723,21 +722,18 @@ class STLSTMDataset(Dataset):
 
         # --------------------------------------------------
         # Outflow at origin station s
-        # --------------------------------------------------
-        hist_out = torch.cat([
-            self.outflow[dd][t - self.H:t, self.s] for dd in L
-        ])
-        real_out = self.outflow[d][t - self.h:t, self.s]
-        rows.append(torch.cat([hist_out, real_out], dim=0))
-
-        # --------------------------------------------------
+        #
         # Inflow at destination station e
         # --------------------------------------------------
-        hist_in = torch.cat([
-            self.inflow[dd][t - self.H:t, self.e] for dd in L
-        ])
-        real_in = self.inflow[d][t - self.h:t, self.e]
-        rows.append(torch.cat([hist_in, real_in], dim=0))
+        # Origin s: 승차량(Inflow)을 봐야 함 (수요 발생)
+        hist_s = torch.cat([self.inflow[dd][t - self.H:t, self.s] for dd in L])
+        real_s = self.inflow[d][t - self.h:t, self.s]
+
+        # Destination e: 하차량(Outflow)을 봐야 함 (수요 흡수)
+        hist_e = torch.cat([self.outflow[dd][t - self.H:t, self.e] for dd in L])
+        real_e = self.outflow[d][t - self.h:t, self.e]
+        rows.append(torch.cat([hist_s, real_s], dim=0))
+        rows.append(torch.cat([hist_e, real_e], dim=0))
 
         # --------------------------------------------------
         # Final input tensor

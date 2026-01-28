@@ -51,8 +51,8 @@ def build_daily_od_and_flows(dataset):
         end   = dataset.day_end_minute
 
         od = day_data[start:end].sum(dim=0)  # (N,N)
-        inflow = od.sum(dim=0)   # destination 기준
-        outflow = od.sum(dim=1)  # origin 기준
+        inflow = od.sum(dim=1)   # destination 기준
+        outflow = od.sum(dim=0)  # origin 기준
 
         daily_od.append(od)
         daily_inflow.append(inflow)
@@ -329,14 +329,30 @@ def collect_od_travel_times(afc_records):
 
     return travel_times
 
-def compute_W(travel_times, time_span_minutes=15):
+def compute_W(travel_times, time_span_minutes=15, default_w=4):
     """
-    return: W[(i,j)] = travel_time_limit (slot 단위)
+    논문의 95th Percentile 방식을 따르되, 데이터가 없는 경우를 대비
     """
     W = {}
+    # travel_times: {(i,j): [duration1, duration2, ...]}
+    
     for (i, j), times in travel_times.items():
-        p95 = np.percentile(times, 95)
-        W[(i, j)] = int(np.ceil(p95 / time_span_minutes))
+        if not times:
+            W[(i, j)] = default_w
+            continue
+            
+        # 데이터가 너무 적으면(예: 1~2개) 통계가 불안정하므로 보수적으로 처리하거나
+        # 그냥 계산하되 최소 샘플 수 조건을 걸 수 있음
+        if len(times) < 5:
+            # 샘플이 적으면 평균이나 max를 쓰거나, default 사용
+            p95 = np.max(times) 
+        else:
+            p95 = np.percentile(times, 95)
+
+        # 논문 수식 적용: 올림 처리 후 int 변환
+        slot = int(np.ceil(p95 / time_span_minutes))
+        W[(i, j)] = max(1, slot) # 최소 1 slot은 걸린다고 가정
+
     return W
 
 def build_hop_distance_matrix(adj_matrix):
