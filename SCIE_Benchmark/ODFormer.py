@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -66,6 +67,37 @@ def chebyshev_basis(L: torch.Tensor, K: int) -> torch.Tensor:
         T_k.append(Tk)
     return torch.stack(T_k[:K], dim=0)  # (K,N,N)
 
+def build_laplacian(adj: np.ndarray):
+    A = adj.astype(np.float32)
+    deg = A.sum(axis=1)
+
+    # D^{-1/2}, degree=0 → 0으로 처리
+    deg_inv_sqrt = np.zeros_like(deg)
+    nonzero = deg > 0
+    deg_inv_sqrt[nonzero] = 1.0 / np.sqrt(deg[nonzero])
+
+    D_inv_sqrt = np.diag(deg_inv_sqrt)
+
+    L = np.eye(A.shape[0]) - D_inv_sqrt @ A @ D_inv_sqrt
+    return torch.tensor(L, dtype=torch.float32)
+
+
+class TemporalProjector(nn.Module):
+    """
+    Project OD matrix to temporal latent tokens
+    """
+    def __init__(self, num_regions, feature_dim, d_model):
+        super().__init__()
+        self.in_dim = num_regions * num_regions * feature_dim
+        self.proj = nn.Linear(self.in_dim, d_model)
+
+    def forward(self, M):
+        # M: (B,T,N,N,F)
+        B, T, N, _, F = M.shape
+        x = M.view(B, T, -1)      # (B,T,N*N*F)
+        return self.proj(x)       # (B,T,d_model)
+
+
 class ODAttention(nn.Module):
     """
     Sparse OD Attention with Shannon Entropy query selection
@@ -123,7 +155,7 @@ class ODAttention(nn.Module):
 
         M_flat = M.view(BT, N, N, Fdim)
         out = torch.einsum("bij,bjkl->bikl", omega, M_flat)
-        out = torch.einsum("bikl,bjl->bijk", out, delta)
+        out = torch.einsum("bilf,bjl->bijf", out, delta)
 
         return out.view(B, T, N, N, Fdim)
 
@@ -240,34 +272,60 @@ class PeriodSparseSelfAttention(nn.Module):
 
 
 class ODformerEncoderLayer(nn.Module):
-    def __init__(self, num_regions, feature_dim, hidden_dim, alpha, K_gcn, d_model, top_k, mov_avg_win, dropout=0.0):
+    def __init__(
+        self,
+        num_regions,
+        feature_dim,
+        hidden_dim,
+        alpha,
+        K_gcn,
+        d_model,
+        top_k,
+        mov_avg_win=25,
+        dropout=0.0
+    ):
         super().__init__()
-        self.spatial = SpatialDependency(num_regions, feature_dim, hidden_dim, alpha, K=K_gcn)
-        self.period = PeriodicityExtractor(top_k=top_k, mov_avg_win=mov_avg_win)
-        self.temporal = PeriodSparseSelfAttention(d_model=d_model, num_heads=top_k, dropout=dropout)
+
+        self.spatial = SpatialDependency(
+            num_regions, feature_dim, hidden_dim, alpha, K=K_gcn
+        )
+
+        self.temporal_proj = TemporalProjector(
+            num_regions, feature_dim, d_model
+        )
+
+        self.period = PeriodicityExtractor(
+            top_k=top_k, mov_avg_win=mov_avg_win
+        )
+
+        self.temporal = PeriodSparseSelfAttention(
+            d_model=d_model,
+            num_heads=top_k,
+            dropout=dropout
+        )
+
         self.ffn = nn.Sequential(
             nn.Linear(d_model, 4*d_model),
             nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(4*d_model, d_model),
         )
+
         self.norm1 = nn.LayerNorm(d_model)
         self.norm2 = nn.LayerNorm(d_model)
-        
-        # --- period cache ---
+
         self.register_buffer("step_counter", torch.zeros(1, dtype=torch.long))
         self.cached_periods = None
         self.Pmax = None
 
     def forward(self, M, L_o, L_d):
-        # spatial on OD matrices
-        M = self.spatial(M, L_o, L_d)  # (B,T,N,N,F)
+        # 1. Spatial dependency
+        M = self.spatial(M, L_o, L_d)     # (B,T,N,N,F)
 
-        # flatten for temporal attention
-        B, T, N, _, Fdim = M.shape
-        x = M.view(B, T, -1)  # (B,T,D)
+        # 2. Temporal projection
+        x = self.temporal_proj(M)         # (B,T,d_model)
 
-        # update period every Pmax
+        # 3. Period update (논문 Eq.10–11)
         if self.cached_periods is None:
             periods = self.period(M)
             self.cached_periods = periods.detach()
@@ -280,17 +338,19 @@ class ODformerEncoderLayer(nn.Module):
 
         self.step_counter += 1
 
-        # temporal
+        # 4. Period-sparse attention
         h = self.temporal(self.norm1(x), periods)
         x = x + h
         x = x + self.ffn(self.norm2(x))
-        return x, periods  # x is encoder token sequence (B,T,D)
+
+        return x, periods   # (B,T,d_model)
+
 
 class ODformerDecoderLayer(nn.Module):
-    def __init__(self, d_model, top_k, dropout=0.0):
+    def __init__(self, d_model, top_k, num_heads, dropout=0.0):
         super().__init__()
-        self.self_attn = PeriodSparseSelfAttention(d_model=d_model, num_heads=top_k, dropout=dropout)
-        self.cross_attn = nn.MultiheadAttention(d_model, num_heads=top_k, dropout=dropout, batch_first=True)
+        self.self_attn = PeriodSparseSelfAttention(d_model=d_model, num_heads=num_heads, dropout=dropout)
+        self.cross_attn = nn.MultiheadAttention(d_model, num_heads=num_heads, dropout=dropout, batch_first=True)
 
         self.ffn = nn.Sequential(
             nn.Linear(d_model, 4*d_model),
@@ -325,14 +385,16 @@ class ODFormer(nn.Module):
         self,
         num_regions: int,
         feature_dim: int,
+        d_model: int = 128,
         hidden_dim: int = 64,
         alpha: float = 0.7,
         K_gcn: int = 3,
         top_k_periods: int = 4,
+        num_heads: int = 8,
         mov_avg_win: int = 25,
         num_enc_layers: int = 2,
         num_dec_layers: int = 2,
-        dropout: float = 0.0,
+        dropout: float = 0.1,
         pred_len: int = 192,
         out_feature_dim: int | None = None,
     ):
@@ -342,7 +404,7 @@ class ODFormer(nn.Module):
         self.O = pred_len
         self.top_k = top_k_periods
 
-        self.d_model = num_regions * num_regions * feature_dim
+        self.d_model = d_model
         self.out_F = out_feature_dim if out_feature_dim is not None else feature_dim
         self.out_dim = num_regions * num_regions * self.out_F
 
@@ -362,7 +424,7 @@ class ODFormer(nn.Module):
         ])
 
         self.decoder_layers = nn.ModuleList([
-            ODformerDecoderLayer(d_model=self.d_model, top_k=top_k_periods, dropout=dropout)
+            ODformerDecoderLayer(d_model=self.d_model, num_heads=num_heads, top_k=top_k_periods, dropout=dropout)
             for _ in range(num_dec_layers)
         ])
 
@@ -371,7 +433,7 @@ class ODFormer(nn.Module):
         self.pos_emb_enc = nn.Parameter(torch.zeros(1, 2048, self.d_model))  # enough length
         self.pos_emb_dec = nn.Parameter(torch.zeros(1, 2048, self.d_model))
 
-        self.proj_out = nn.Linear(self.d_model, self.out_dim)
+        self.proj_out = nn.Linear(self.d_model, num_regions * num_regions * self.out_F)
 
     def forward(self, X: torch.Tensor, L_o: torch.Tensor, L_d: torch.Tensor) -> torch.Tensor:
         """

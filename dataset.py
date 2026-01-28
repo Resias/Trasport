@@ -99,6 +99,42 @@ def build_laplacian(adj: np.ndarray):
     L = np.eye(A.shape[0]) - D_inv_sqrt @ A @ D_inv_sqrt
     return torch.tensor(L, dtype=torch.float32)
 
+def compute_clip_value(
+    data_root,
+    q=0.98,
+    sample_ratio=0.001,
+    max_samples_per_file=500_000,
+    seed=42
+):
+    """
+    Memory-safe approximate quantile estimation.
+    논문 faithful: 98% clipping 유지
+    """
+    rng = np.random.default_rng(seed)
+    samples = []
+
+    files = sorted(os.listdir(data_root))
+
+    for f in tqdm(files, desc="Estimating clip value (sampling)"):
+        x = np.load(os.path.join(data_root, f), mmap_mode="r")
+        flat = x.reshape(-1)
+
+        n = flat.shape[0]
+        k = min(int(n * sample_ratio), max_samples_per_file)
+
+        if k <= 0:
+            continue
+
+        idx = rng.choice(n, size=k, replace=False)
+        samples.append(torch.from_numpy(flat[idx]).float())
+
+    if len(samples) == 0:
+        raise RuntimeError("No samples collected for clip value estimation")
+
+    samples = torch.cat(samples)
+    clip_val = torch.quantile(samples, q)
+
+    return clip_val
 
 # ==========================================
 # Spatial Correlation Selector (User Logic Integrated)
@@ -962,22 +998,8 @@ class ODFormerMetroDataset(Dataset):
         # =========================
         # 98% clipping 기준 설정
         # =========================
-        if clip_value is None:
-            if not is_train:
-                raise ValueError("clip_value must be provided for val/test dataset")
-
-            # trainset: clip_value 계산
-            all_vals = []
-            for day in self.day_cache:
-                if isinstance(day, torch.Tensor):
-                    all_vals.append(day.reshape(-1))
-                else:
-                    all_vals.append(torch.from_numpy(day.reshape(-1)))
-            all_vals = torch.cat(all_vals)
-            self.clip_value = torch.quantile(all_vals, 0.98)
-        else:
-            # val/test: train clip_value 재사용
-            self.clip_value = clip_value
+        assert clip_value is not None
+        self.clip_value = clip_value
 
         # sliding window index
         self.indices = []
@@ -1216,6 +1238,8 @@ def get_odformer_dataset(
     train_path = os.path.join(data_root, train_subdir)
     val_path   = os.path.join(data_root, val_subdir)
 
+    clip_value = compute_clip_value(train_path)
+
     # ---- trainset ----
     trainset = ODFormerMetroDataset(
         data_root=train_path,
@@ -1224,7 +1248,7 @@ def get_odformer_dataset(
         hop_size=hop_size,
         use_time_feature=use_time_feature,
         cache_in_mem=cache_in_mem,
-        clip_value=None,
+        clip_value=clip_value,
         is_train=True
     )
 
