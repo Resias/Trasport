@@ -31,9 +31,9 @@ def main():
     parser.add_argument("--adj_csv", default="./AD_matrix_trimmed_common.csv")
 
     # window
-    parser.add_argument("--window_size", type=int, default=96)
-    parser.add_argument("--pred_size", type=int, default=192)
-    parser.add_argument("--hop_size", type=int, default=12)
+    parser.add_argument("--window_size", type=int, default=60)
+    parser.add_argument("--pred_size", type=int, default=30)
+    parser.add_argument("--hop_size", type=int, default=10)
 
     # model
     parser.add_argument("--hidden_dim", type=int, default=64)
@@ -41,7 +41,7 @@ def main():
     parser.add_argument("--alpha", type=float, default=0.7)
 
     # training
-    parser.add_argument("--batch_size", type=int, default=4)
+    parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--max_epochs", type=int, default=100)
     parser.add_argument("--num_workers", type=int, default=2)
