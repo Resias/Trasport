@@ -1018,7 +1018,7 @@ class ODFormerMetroDataset(Dataset):
     def __len__(self):
         return len(self.indices)
 
-    def _build_feature(self, od, minute_idx):
+    def _build_feature(self, od, minute_idx, is_target=False):
         """
         od: (T, N, N)
         return: (T, N, N, F)
@@ -1030,9 +1030,9 @@ class ODFormerMetroDataset(Dataset):
         od = torch.log1p(od)
         # =====================
 
-        feats = [od.unsqueeze(-1)]  # flow feature
+        feats = [od.unsqueeze(-1)]
 
-        if self.use_time_feature:
+        if self.use_time_feature and not is_target:
             minute = torch.tensor(minute_idx) % 1440
             time_enc = build_time_sin_cos(minute.numpy())
             time_enc = torch.tensor(time_enc, dtype=torch.float32)
@@ -1064,8 +1064,8 @@ class ODFormerMetroDataset(Dataset):
             start+self.window_size+self.pred_size
         )
 
-        X = self._build_feature(x_raw, hist_minutes)
-        Y = self._build_feature(y_raw, fut_minutes)
+        X = self._build_feature(x_raw, hist_minutes, is_target=False)
+        Y = self._build_feature(y_raw, fut_minutes, is_target=True)
         return {
             "X": X,
             "Y": Y,

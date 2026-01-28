@@ -44,7 +44,7 @@ def main():
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--max_epochs", type=int, default=100)
-    parser.add_argument("--num_workers", type=int, default=0)
+    parser.add_argument("--num_workers", type=int, default=2)
     parser.add_argument("--use_ddp", action="store_true")
 
     # logging
@@ -96,6 +96,7 @@ def main():
         num_regions=N,
         feature_dim=F,
         hidden_dim=args.hidden_dim,
+        out_feature_dim=1,
         alpha=args.alpha,
         num_heads=args.num_heads,
         pred_len=args.pred_size
@@ -140,7 +141,7 @@ def main():
         strategy=strategy,
         logger=logger,
         callbacks=[early_stop],
-        log_every_n_steps=50,
+        log_every_n_steps=10,
         gradient_clip_val=1.0
     )
 

@@ -449,8 +449,8 @@ class ODformerLM(L.LightningModule):
         self.register_buffer("L_origin", L)
         self.register_buffer("L_destination", L.clone())
 
-    def forward(self, X, L_o, L_d):
-        return self.model(X, L_o, L_d)
+    def forward(self, X):
+        return self.model(X, self.L_origin, self.L_destination)
 
     # -------------------------
     # Metrics (paper-style)
@@ -459,13 +459,16 @@ class ODformerLM(L.LightningModule):
         """
         y_true, y_pred: (B, |V|)
         """
+        y_pred = torch.expm1(y_pred)
+        y_true = torch.expm1(y_true)
         mask = (y_true > 0).float()
+        den = torch.clamp(mask.sum(), min=1.0)
 
-        mse = ((y_true - y_pred) ** 2 * mask).sum() / mask.sum()
-        mae = (torch.abs(y_true - y_pred) * mask).sum() / mask.sum()
+        mse = ((y_true - y_pred) ** 2 * mask).sum() / den
+        mae = (torch.abs(y_true - y_pred) * mask).sum() / den
 
         denom = torch.clamp(torch.abs(y_true), min=self.mape_eps)
-        mape = (torch.abs((y_true - y_pred) / denom) * mask).sum() / mask.sum() * 100
+        mape = (torch.abs((y_true - y_pred) / denom) * mask).sum() / den * 100
 
         smape_ = smape(
             y_true * mask,
