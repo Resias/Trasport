@@ -44,7 +44,7 @@ def main():
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--max_epochs", type=int, default=100)
-    parser.add_argument("--num_workers", type=int, default=4)
+    parser.add_argument("--num_workers", type=int, default=0)
     parser.add_argument("--use_ddp", action="store_true")
 
     # logging
@@ -57,7 +57,7 @@ def main():
     # =====================
     import pandas as pd
     adj = pd.read_csv(args.adj_csv, index_col=0).values
-
+    print(f"Adjacency matrix shape: {adj.shape}")
     trainset, valset = get_odformer_dataset(
         data_root=args.data_root,
         train_subdir=args.train_subdir,
@@ -66,7 +66,7 @@ def main():
         hop_size=args.hop_size,
         pred_size=args.pred_size,
         use_time_feature=True,
-        cache_in_mem=True
+        cache_in_mem=False
     )
 
     train_loader = DataLoader(
@@ -97,7 +97,7 @@ def main():
         feature_dim=F,
         hidden_dim=args.hidden_dim,
         alpha=args.alpha,
-        top_k_periods=args.num_heads,
+        num_heads=args.num_heads,
         pred_len=args.pred_size
     )
 
