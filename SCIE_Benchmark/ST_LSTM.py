@@ -190,6 +190,130 @@ def compute_spatial_correlation(
 
     return top_x_od
 
+@torch.no_grad()
+def compute_spatial_correlation_pruned_fast(
+    OD_ts,          # (Days, T, N, N) torch
+    od_sum,
+    inflow_sum,
+    outflow_sum,
+    dist_matrix,    # np or torch
+    top_x=10,
+    max_hop=4,
+    omega=(0.33, 0.33, 0.34),
+    device="cuda",
+    chunk=4096,
+    eps=1e-6,
+):
+    """
+    핵심 가속:
+      - (s,e)마다 M_se 한 번만 생성
+      - 후보 M_ij들을 chunk로 모아서 corr 벡터화
+      - torch 연산으로 cov/std 계산
+    """
+    # ---- device 이동 ----
+    OD_ts = OD_ts.to(device, non_blocking=True)
+    od_sum = od_sum.to(device, non_blocking=True)
+    inflow_sum = inflow_sum.to(device, non_blocking=True)
+    outflow_sum = outflow_sum.to(device, non_blocking=True)
+
+    if not torch.is_tensor(dist_matrix):
+        dist_matrix_t = torch.tensor(dist_matrix, device=device)
+    else:
+        dist_matrix_t = dist_matrix.to(device)
+
+    w1, w2, w3 = omega
+    N = od_sum.shape[0]
+    top_x_od = {}
+
+    # 시간축 flatten 한 번만 view를 쓰기 위해 미리 reshape
+    # (Days, T, N, N) -> (L, N, N), L=Days*T
+    L = OD_ts.shape[0] * OD_ts.shape[1]
+    OD_flat = OD_ts.reshape(L, N, N)  # view
+
+    for s in tqdm(range(N), desc="Spatial corr (origin)"):
+        # (s,e)별로 반복
+        for e in range(N):
+            if s == e:
+                continue
+
+            # 후보 생성 (CPU numpy로 해도 됨)
+            origin_candidates = torch.where(dist_matrix_t[s] <= max_hop)[0]
+            dest_candidates   = torch.where(dist_matrix_t[:, e] <= max_hop)[0]
+            if origin_candidates.numel() == 0 or dest_candidates.numel() == 0:
+                top_x_od[(s, e)] = []
+                continue
+
+            # 후보 (i,j) 리스트 (tensor로 구성)
+            # candidates = cartesian product
+            ii = origin_candidates.repeat_interleave(dest_candidates.numel())
+            jj = dest_candidates.repeat(origin_candidates.numel())
+            valid = ii != jj
+            ii = ii[valid]
+            jj = jj[valid]
+            C = ii.numel()
+            if C == 0:
+                top_x_od[(s, e)] = []
+                continue
+
+            # -------- p_ij: corr(M_se, M_ij) --------
+            y = OD_flat[:, s, e]                       # (L,)
+            y = y - y.mean()
+            y_std = y.std(unbiased=False).clamp_min(eps)
+
+            # 후보들을 chunk로 처리 (메모리 폭발 방지)
+            p_scores = torch.empty(C, device=device)
+
+            for st in range(0, C, chunk):
+                ed = min(st + chunk, C)
+                i_chunk = ii[st:ed]
+                j_chunk = jj[st:ed]
+
+                X = OD_flat[:, i_chunk, j_chunk]      # (L, Cc)
+                X = X - X.mean(dim=0, keepdim=True)
+                X_std = X.std(dim=0, unbiased=False).clamp_min(eps)
+
+                # corr = cov / (stdX * stdY)
+                cov = (X * y[:, None]).mean(dim=0)
+                p = (cov / (X_std * y_std)).abs()
+                p_scores[st:ed] = p
+
+            # -------- q_ij, r_ij: 후보마다 스칼라 계산 (벡터화 가능) --------
+            # q: mie/fe_out + msj/fs_in
+            mie = od_sum[ii, e]                         # (C,)
+            msj = od_sum[s, jj]                         # (C,)
+            fe_out = (outflow_sum[e] + eps)             # scalar
+            fs_in  = (inflow_sum[s] + eps)              # scalar
+            q_scores = mie / fe_out + msj / fs_in       # (C,)
+
+            # r: 0.25*(i_rs + i_je + i_ie + i_js)
+            fi = inflow_sum[ii] + outflow_sum[ii]       # (C,)
+            fj = inflow_sum[jj] + outflow_sum[jj]       # (C,)
+            fs = inflow_sum[s] + outflow_sum[s]         # scalar
+            fe = inflow_sum[e] + outflow_sum[e]         # scalar
+
+            d_is = dist_matrix_t[ii, s].clamp_min(1.0)  # (C,)
+            d_je = dist_matrix_t[jj, e].clamp_min(1.0)
+            d_ie = dist_matrix_t[ii, e].clamp_min(1.0)
+            d_js = dist_matrix_t[jj, s].clamp_min(1.0)
+
+            i_rs = (fi * fs) / (d_is * d_is + eps)
+            i_je = (fj * fe) / (d_je * d_je + eps)
+            i_ie = (fi * fe) / (d_ie * d_ie + eps)
+            i_js = (fj * fs) / (d_js * d_js + eps)
+
+            r_scores = 0.25 * (i_rs + i_je + i_ie + i_js)
+
+            # -------- z --------
+            z = w1 * p_scores + w2 * q_scores + w3 * r_scores
+
+            # top-k
+            topk = torch.topk(z, k=min(top_x, C), largest=True).indices
+            sel_i = ii[topk].tolist()
+            sel_j = jj[topk].tolist()
+            top_x_od[(s, e)] = list(zip(sel_i, sel_j))
+
+    return top_x_od
+
 def get_candidate_od_pairs(s, e, dist_matrix, max_hop=4):
     """
     Spatial locality-based candidate selection
@@ -432,6 +556,11 @@ class STLSTM(nn.Module):
 
     def __init__(self, input_dim, hidden_dim=128, num_layers=2, pred_size=30):
         super().__init__()
+        self.feature_dim = input_dim
+        self.gate = nn.Sequential(
+            nn.Linear(input_dim, input_dim),
+            nn.Sigmoid()
+        )
 
         self.lstm = nn.LSTM(
             input_size=input_dim,
@@ -445,6 +574,10 @@ class STLSTM(nn.Module):
         """
         x: (B, aH+h, x+3)
         """
+        # -------- Gate --------
+        G = self.gate(x)
+        x = G * x
+        
         out, _ = self.lstm(x)
         return self.fc(out[:, -1])  # last timestep
 
