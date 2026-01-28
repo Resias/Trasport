@@ -91,54 +91,7 @@ class MetroLM(L.LightningModule):
     def configure_optimizers(self):
         optim = Adam(self.parameters(), lr=self.lr)
         return optim
-
-
-class TCNMetroLM(L.LightningModule):
-    def __init__(self, model, loss, lr, mape_eps=1e-3):
-        super().__init__()
-        self.model = model
-        self.loss = loss
-        self.lr = lr
-        self.mape_eps = mape_eps
-
-    def forward_batch(self, batch):
-        x = batch["x"]          # (B, T, F)
-        y = batch["y"]          # (B, pred_size, 1)
-        pred, att = self.model(x)
-        return pred, y, x.size(0)
-
-    def _compute_metrics(self, y_true, y_pred):
-        mse = torch.mean((y_true - y_pred) ** 2)
-        mae = torch.mean(torch.abs(y_true - y_pred))
-        denom = torch.clamp(torch.abs(y_true), min=self.mape_eps)
-        mape = torch.mean(torch.abs((y_true - y_pred) / denom)) * 100.0
-        smape_ = smape(y_true, y_pred, eps=self.mape_eps)
-        return mse, mae, mape, smape_
-
-    def training_step(self, batch, batch_idx):
-        y_pred, y_true, batch_size = self.forward_batch(batch)
-        y_last = y_true[:, -1, :]  # (B, 1)
-        loss = self.loss(y_last, y_pred)
-
-        self.log("train_loss", loss, prog_bar=True, batch_size=batch_size, on_epoch=True, on_step=True)
-        return loss
-
-    def validation_step(self, batch, batch_idx):
-        y_pred, y_true, batch_size = self.forward_batch(batch)
-        y_last = y_true[:, -1, :]
-
-        mse, mae, mape, smape_ = self._compute_metrics(y_last, y_pred)
-
-        self.log("val_mse", mse, batch_size=batch_size, on_epoch=True)
-        self.log("val_mae", mae, batch_size=batch_size, on_epoch=True)
-        self.log("val_mape", mape, batch_size=batch_size, on_epoch=True)
-        self.log("val_smape", smape_, batch_size=batch_size, on_epoch=True)
-
-        return mse
-
-    def configure_optimizers(self):
-        return Adam(self.parameters(), lr=self.lr)
-    
+   
 
 class STLSTMLM(L.LightningModule):
     def __init__(self, model, loss, lr=1e-3, pred_size=30, mape_eps=1e-3):
@@ -156,8 +109,11 @@ class STLSTMLM(L.LightningModule):
         y_true = y_true.squeeze(-1)
         # y_pred is already (B, Pred) due to FC output_dim
         
-        mse = torch.mean((y_true - y_pred) ** 2)
-        mae = torch.mean(torch.abs(y_true - y_pred))
+        mask = (y_true > 0).float()
+        den = torch.clamp(mask.sum(), min=1.0)
+        
+        mse = torch.mean((y_true - y_pred) ** 2) / den
+        mae = torch.mean(torch.abs(y_true - y_pred)) / den
         denom = torch.clamp(torch.abs(y_true), min=self.mape_eps)
         mape = torch.mean(torch.abs((y_true - y_pred) / denom)) * 100.0
         smape_ = smape(y_true, y_pred, eps=self.mape_eps)
@@ -186,10 +142,7 @@ class STLSTMLM(L.LightningModule):
     
     def configure_optimizers(self):
         return Adam(self.parameters(), lr=self.lr)
-    
-# ==========================================
-# MPGCN Trainer
-# ==========================================
+
 class MPGCNLM(L.LightningModule):
     def __init__(self, model, loss, lr=1e-3, pred_size=1, mape_eps=1e-3):
         super().__init__()
