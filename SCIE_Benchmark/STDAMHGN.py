@@ -9,7 +9,7 @@ class HyperSageLayer(nn.Module):
     HyperSage convolution layer (p = 1)
     """
 
-    def __init__(self, in_dim, out_dim, Q=64):
+    def __init__(self, in_dim, out_dim, Q=32):
         super().__init__()
         self.Q = Q
         self.fc = nn.Linear(in_dim, out_dim)
@@ -27,27 +27,29 @@ class HyperSageLayer(nn.Module):
         B, V, F = X.shape
         device = X.device
 
-        X_out = torch.zeros(B, V, F, device=device)
-
-        # hyperedge-wise aggregation
-        deg = torch.zeros(V, device=device)
-
+        Xe = torch.zeros(B, V, F, device=device)
+        Nv = torch.zeros(V, device=device)
+        
         for e in hyperedges:
-            e = self._sample_hyperedge(e, self.Q)
-
+            if len(e) > self.Q:
+                e = random.sample(e, self.Q)
             e = torch.tensor(e, device=device)
-            e = e[(e >= 0) & (e < V)]     # ★ 핵심 수정 (논문 의미 유지)
-
-            if e.numel() == 0:
+            if len(e) == 0:
                 continue
 
-            agg = X[:, e, :].mean(dim=1)
-            X_out[:, e, :] += agg.unsqueeze(1)
-            deg[e] += 1
+            agg = X[:, e].mean(dim=1)   # (B,D)
 
-        deg = deg.clamp(min=1.0)
-        X_out = X_out / deg.view(1, V, 1)
-        return self.fc(X_out)
+            for v in e:
+                Xe[:, v] += agg
+                Nv[v] += len(e)
+
+        Nv = Nv.clamp(min=1)
+
+        Xe = Xe / Nv.view(1,V,1)
+
+        # residual + linear
+        out = X + self.fc(Xe)
+        return F.relu(out)
 
 class DAMHG(nn.Module):
     """
@@ -100,7 +102,7 @@ class HypergraphAttention(nn.Module):
         for i in range(H):
             Y = Y + alpha[i] * Xs[i]
 
-        return Y    # (B, |V|, D)
+        return F.relu(Y)    # (B, |V|, D)
 
 class STDAMHGN(nn.Module):
     def __init__(
@@ -170,13 +172,8 @@ class STDAMHGN(nn.Module):
             x_fused = self.attn(xs)
             p_seq.append(x_fused)
 
-        p_seq = torch.stack(p_seq, dim=1)          # (B, n, |V|, D)
-        # periodicity vertex-wise LSTM
-        p_seq_v = p_seq.permute(0, 2, 1, 3).contiguous()
-        p_seq_v = p_seq_v.view(B * V, self.n, D)
-
-        _, (h_p, _) = self.lstm(p_seq_v)
-        h_p = h_p[-1].view(B, V, D)
+        p_seq = torch.stack(p_seq, dim=1)   # (B,n,V,D)
+        h_p = p_seq.mean(dim=1)            # (B,V,D)
 
 
         # ---------- fusion (vertex-wise) ----------
