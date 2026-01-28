@@ -110,15 +110,23 @@ class STLSTMLM(L.LightningModule):
         # y_pred is already (B, Pred) due to FC output_dim
         
         mask = (y_true > 0).float()
-        den = torch.clamp(mask.sum(), min=1.0)
+        mask_sum = mask.sum()
+
+        if mask_sum < 1:
+            return None  # skip batch
+
+        diff = (y_pred - y_true)
+        mse = ((y_true - y_pred)**2 * mask).sum() / mask_sum
+        mae = (torch.abs(y_true - y_pred) * mask).sum() / mask_sum
         
-        mse = ((y_true-y_pred)**2 * mask).sum() / mask.sum()
-        mae = torch.mean(torch.abs(y_true - y_pred)) / den
         denom = torch.clamp(torch.abs(y_true), min=self.mape_eps)
         mape = torch.mean(torch.abs((y_true - y_pred) / denom)) * 100.0
-        smape_ = smape(y_true, y_pred, eps=self.mape_eps)
+
+        denom2 = (y_true.abs() + y_pred.abs()).clamp(min=self.mape_eps)
+        smape_ = (2 * diff.abs() / denom2 * mask).sum() / mask_sum * 100.0
+        
         rmse = torch.sqrt(mse)
-        return mse, mae, mape, smape_, rmse
+        return mse, mae, mape, smape_, rmse, mask_sum  # mask_sum 같이 넘김(가중 로깅용)
     
     def training_step(self, batch, batch_idx):
         x = batch['x']
@@ -132,12 +140,17 @@ class STLSTMLM(L.LightningModule):
         x = batch['x']
         y = batch['y'].squeeze(-1)
         y_pred = self(x)
-        mse, mae, mape, smape_, rmse = self._compute_metrics(y, y_pred)
-        self.log("val_mse", mse, prog_bar=True)
-        self.log("val_mae", mae, prog_bar=True)
-        self.log("val_mape", mape, prog_bar=True)
-        self.log("val_smape", smape_, prog_bar=True)
-        self.log("val_rmse", rmse, prog_bar=True)
+        metrics = self._compute_metrics(y, y_pred)
+        if metrics is None:
+            return  # <- 이게 정답. log도 안 하고 return도 안 함.
+        mse, mae, mape, smape_, rmse, mask_sum = metrics
+        bs = int(mask_sum.item())
+        self.log("val_mse", mse, prog_bar=True, on_step=False, batch_size=bs)
+        self.log("val_mae", mae, prog_bar=True, on_step=False, batch_size=bs)
+        self.log("val_mape", mape, prog_bar=True, on_step=False, batch_size=bs)
+        self.log("val_smape", smape_, prog_bar=True, on_step=False, batch_size=bs)
+        self.log("val_rmse", rmse, prog_bar=True, on_step=False, batch_size=bs)
+        
         return mse
     
     def configure_optimizers(self):

@@ -4,7 +4,8 @@ from ST_LSTM import (
     aggregate_training_od,
     compute_W,               # [변경] Fast 버전 임포트
     compute_spatial_correlation_pruned,
-    build_hop_distance_matrix
+    build_hop_distance_matrix,
+    compute_spatial_correlation_pruned_fast
 )
 import pandas as pd
 import numpy as np
@@ -26,7 +27,10 @@ files = sorted([
 print(f"Loading {len(files)} raw daily OD files...")
 
 OD = [np.load(f) for f in files]   # each: (1440,N,N)
-OD_ts = torch.tensor(np.stack(OD), dtype=torch.float32)
+OD_ts = torch.tensor(np.stack(OD), dtype=torch.float32)[:, 300:1440]
+
+if torch.cuda.is_available():
+    OD_ts = OD_ts.half()
 
 day_cluster = temporal_feature_extraction_raw(OD)
 np.save("day_cluster.npy", day_cluster)
@@ -99,14 +103,16 @@ W = build_W_from_hop_distance(
 )
 np.save("W.npy", W)
 
-top_x_od = compute_spatial_correlation_pruned(
+top_x_od = compute_spatial_correlation_pruned_fast(
     OD_ts,
     od_sum,
     in_sum,
     out_sum,
     dist_matrix=station_dist_matrix,
     top_x=10,
-    max_hop=4
+    max_hop=4,
+    device="cuda" if torch.cuda.is_available() else "cpu",
+    chunk=4096
 )
 np.save("top_x_od.npy", top_x_od)
 print("Preprocessing Done.")
