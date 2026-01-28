@@ -57,7 +57,7 @@ def parse_args():
     parser.add_argument(
         "--q_sample",
         type=int,
-        default=64,
+        default=32,
         help="Q for CLUSTER & SAMPLE strategy"
     )
     parser.add_argument("--n_cluster_tendency", type=int, default=3)
