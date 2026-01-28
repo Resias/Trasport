@@ -32,8 +32,8 @@ OD_ts = torch.tensor(np.stack(OD), dtype=torch.float32)[:, 300:1440]
 if torch.cuda.is_available():
     OD_ts = OD_ts.half()
 
-day_cluster = temporal_feature_extraction_raw(OD)
-np.save("day_cluster.npy", day_cluster)
+# day_cluster = temporal_feature_extraction_raw(OD)
+# np.save("day_cluster.npy", day_cluster)
 
 daily_od, daily_in, daily_out = build_daily_od_and_flows(OD)
 
@@ -95,13 +95,13 @@ def build_W_from_hop_distance(dist_matrix, minutes_per_hop=5.0, time_span_minute
             
     return W
 
-W = build_W_from_hop_distance(
-    station_dist_matrix,
-    minutes_per_hop=3.0,  # [중요] 보수적으로 5분 설정 (Data Leakage 방지)
-    time_span_minutes=1, # 데이터셋의 window_size와는 다름, 집계 간격임
-    max_hop=None          # 전체 네트워크에 대해 계산 (Dataset의 fallback 최소화)
-)
-np.save("W.npy", W)
+# W = build_W_from_hop_distance(
+#     station_dist_matrix,
+#     minutes_per_hop=3.0,  # [중요] 보수적으로 5분 설정 (Data Leakage 방지)
+#     time_span_minutes=1, # 데이터셋의 window_size와는 다름, 집계 간격임
+#     max_hop=None          # 전체 네트워크에 대해 계산 (Dataset의 fallback 최소화)
+# )
+# np.save("W.npy", W)
 
 top_x_od = compute_spatial_correlation_pruned_fast(
     OD_ts,
@@ -112,7 +112,7 @@ top_x_od = compute_spatial_correlation_pruned_fast(
     top_x=10,
     max_hop=4,
     device="cuda" if torch.cuda.is_available() else "cpu",
-    chunk=4096
+    chunk=128
 )
 np.save("top_x_od.npy", top_x_od)
 print("Preprocessing Done.")
