@@ -1,5 +1,5 @@
 from ST_LSTM import (
-    temporal_feature_extraction,
+    temporal_feature_extraction_raw,
     build_daily_od_and_flows,
     aggregate_training_od,
     compute_W,               # [변경] Fast 버전 임포트
@@ -8,27 +8,30 @@ from ST_LSTM import (
 )
 import pandas as pd
 import numpy as np
+import torch
 import sys
 import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from dataset import get_dataset
 
-trainset, valset = get_dataset(
-    data_root='/workspace/od_minute',
-    train_subdir='train',
-    val_subdir='test',
-    time_resolution=1,
-    window_size=60,
-    hop_size=10,
-    pred_size=30,
-    cache_in_mem=True
-)
+train_root = "/workspace/od_minute/train"
 
-day_cluster = temporal_feature_extraction(trainset)
+files = sorted([
+    os.path.join(train_root, f)
+    for f in os.listdir(train_root)
+    if f.endswith(".npy")
+])
+
+print(f"Loading {len(files)} raw daily OD files...")
+
+OD = [np.load(f) for f in files]   # each: (1440,N,N)
+OD_ts = torch.tensor(np.stack(OD), dtype=torch.float32)
+
+day_cluster = temporal_feature_extraction_raw(OD)
 np.save("day_cluster.npy", day_cluster)
 
-daily_od, daily_in, daily_out = build_daily_od_and_flows(trainset)
+daily_od, daily_in, daily_out = build_daily_od_and_flows(OD)
 
 # train_days = list(range(len(daily_od) - 7))
 od_sum, in_sum, out_sum = aggregate_training_od(
@@ -90,13 +93,14 @@ def build_W_from_hop_distance(dist_matrix, minutes_per_hop=5.0, time_span_minute
 
 W = build_W_from_hop_distance(
     station_dist_matrix,
-    minutes_per_hop=5.0,  # [중요] 보수적으로 5분 설정 (Data Leakage 방지)
-    time_span_minutes=15, # 데이터셋의 window_size와는 다름, 집계 간격임
+    minutes_per_hop=3.0,  # [중요] 보수적으로 5분 설정 (Data Leakage 방지)
+    time_span_minutes=1, # 데이터셋의 window_size와는 다름, 집계 간격임
     max_hop=None          # 전체 네트워크에 대해 계산 (Dataset의 fallback 최소화)
 )
 np.save("W.npy", W)
 
 top_x_od = compute_spatial_correlation_pruned(
+    OD_ts,
     od_sum,
     in_sum,
     out_sum,

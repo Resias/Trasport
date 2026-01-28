@@ -33,7 +33,7 @@ def build_daily_od_matrices(dataset):
 
     return daily_od_list
 
-def build_daily_od_and_flows(dataset):
+def build_daily_od_and_flows(OD):
     """
     return:
         daily_od: list of (N,N)
@@ -44,21 +44,11 @@ def build_daily_od_and_flows(dataset):
     daily_inflow = []
     daily_outflow = []
 
-    for day_data in tqdm(dataset.day_data_cache):
-        day_data = torch.as_tensor(day_data)
+    daily_od = [torch.tensor(day).sum(dim=0) for day in OD]
+    daily_in = [d.sum(dim=1) for d in daily_od]
+    daily_out = [d.sum(dim=0) for d in daily_od]
 
-        start = dataset.day_start_minute
-        end   = dataset.day_end_minute
-
-        od = day_data[start:end].sum(dim=0)  # (N,N)
-        inflow = od.sum(dim=1)   # destination 기준
-        outflow = od.sum(dim=0)  # origin 기준
-
-        daily_od.append(od)
-        daily_inflow.append(inflow)
-        daily_outflow.append(outflow)
-
-    return daily_od, daily_inflow, daily_outflow
+    return daily_od, daily_in, daily_out
 
 def flatten_od_matrix(od_mat):
     """
@@ -102,9 +92,10 @@ def kmeans_with_elbow(X, k_min=2, k_max=10):
 
     return final_kmeans.labels_, elbow_k
 
-def temporal_feature_extraction(dataset):
+def temporal_feature_extraction_raw(OD):
     print("Step 1: Build daily OD matrices")
-    daily_od_list = build_daily_od_matrices(dataset)
+
+    daily_od_list = [torch.tensor(day).sum(dim=0) for day in OD]  # (N,N)
 
     print("Step 2: Vectorize OD matrices")
     X = build_day_feature_matrix(daily_od_list)
@@ -112,13 +103,12 @@ def temporal_feature_extraction(dataset):
     print("Step 3: Standardize features")
     X = StandardScaler().fit_transform(X)
 
-    print("Step 4: KMeans clustering with elbow method")
+    print("Step 4: KMeans clustering")
     labels, k = kmeans_with_elbow(X)
 
-    day_cluster = {day_idx: int(label)
-                   for day_idx, label in enumerate(labels)}
+    day_cluster = {i: int(l) for i, l in enumerate(labels)}
 
-    print(f"Temporal clustering completed. k = {k}")
+    print(f"Temporal clustering completed. k={k}")
     return day_cluster
 
 def aggregate_training_od(daily_od, daily_inflow, daily_outflow, train_days):
@@ -220,6 +210,7 @@ def get_candidate_od_pairs(s, e, dist_matrix, max_hop=4):
     return candidates
 
 def compute_spatial_correlation_pruned(
+    OD_ts,          # (Days, 1440, N, N)
     od_sum,
     inflow_sum,
     outflow_sum,
@@ -260,8 +251,16 @@ def compute_spatial_correlation_pruned(
                 # -----------------------------
                 # Eq.(18): p_ij
                 # -----------------------------
-                p = od_sum[i, j]
+                # target OD series: (Days*1440,)
+                M_se = OD_ts[:, :, s, e].reshape(-1)
+                M_ij = OD_ts[:, :, i, j].reshape(-1)
 
+                # Pearson corr
+                M_se_c = M_se - M_se.mean()
+                M_ij_c = M_ij - M_ij.mean()
+                den = (M_se_c.std() * M_ij_c.std() + 1e-6)
+                p = torch.abs((M_se_c * M_ij_c).mean() / den)
+                
                 # -----------------------------
                 # Eq.(19): q_ij
                 # -----------------------------
@@ -364,7 +363,7 @@ def build_hop_distance_matrix(adj_matrix):
     dist_matrix = np.full((N, N), np.inf)
 
     for s in range(N):
-        dist_matrix[s, s] = 1.0  # self-distance (division by zero 방지)
+        dist_matrix[s, s] = 0.0  # self-distance (division by zero 방지)
         q = deque([s])
         visited = {s}
         d = 1
@@ -431,7 +430,7 @@ class STLSTM(nn.Module):
     Output: (B, 1)
     """
 
-    def __init__(self, input_dim, hidden_dim=128, num_layers=2):
+    def __init__(self, input_dim, hidden_dim=128, num_layers=2, pred_size=30):
         super().__init__()
 
         self.lstm = nn.LSTM(
@@ -440,7 +439,7 @@ class STLSTM(nn.Module):
             num_layers=num_layers,
             batch_first=True
         )
-        self.fc = nn.Linear(hidden_dim, 1)
+        self.fc = nn.Linear(hidden_dim, pred_size)
 
     def forward(self, x):
         """
