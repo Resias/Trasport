@@ -211,7 +211,6 @@ def compute_spatial_correlation_pruned_fast(
       - torch 연산으로 cov/std 계산
     """
     # ---- device 이동 ----
-    OD_ts = OD_ts.to(device, non_blocking=True)
     od_sum = od_sum.to(device, non_blocking=True)
     inflow_sum = inflow_sum.to(device, non_blocking=True)
     outflow_sum = outflow_sum.to(device, non_blocking=True)
@@ -224,11 +223,6 @@ def compute_spatial_correlation_pruned_fast(
     w1, w2, w3 = omega
     N = od_sum.shape[0]
     top_x_od = {}
-
-    # 시간축 flatten 한 번만 view를 쓰기 위해 미리 reshape
-    # (Days, T, N, N) -> (L, N, N), L=Days*T
-    L = OD_ts.shape[0] * OD_ts.shape[1]
-    OD_flat = OD_ts.reshape(L, N, N)  # view
 
     for s in tqdm(range(N), desc="Spatial corr (origin)"):
         # (s,e)별로 반복
@@ -256,11 +250,10 @@ def compute_spatial_correlation_pruned_fast(
                 continue
 
             # -------- p_ij: corr(M_se, M_ij) --------
-            y = OD_flat[:, s, e]                       # (L,)
+            y = OD_ts[:, :, s, e].reshape(-1).to(device)
             y = y - y.mean()
             y_std = y.std(unbiased=False).clamp_min(eps)
 
-            # 후보들을 chunk로 처리 (메모리 폭발 방지)
             p_scores = torch.empty(C, device=device)
 
             for st in range(0, C, chunk):
@@ -268,14 +261,18 @@ def compute_spatial_correlation_pruned_fast(
                 i_chunk = ii[st:ed]
                 j_chunk = jj[st:ed]
 
-                X = OD_flat[:, i_chunk, j_chunk]      # (L, Cc)
+                # build X chunk without OD_flat
+                # X shape: (L, Cc)
+                X = torch.stack(
+                    [OD_ts[:, :, int(i), int(j)].reshape(-1) for i, j in zip(i_chunk.tolist(), j_chunk.tolist())],
+                    dim=1
+                ).to(device)
+
                 X = X - X.mean(dim=0, keepdim=True)
                 X_std = X.std(dim=0, unbiased=False).clamp_min(eps)
 
-                # corr = cov / (stdX * stdY)
                 cov = (X * y[:, None]).mean(dim=0)
-                p = (cov / (X_std * y_std)).abs()
-                p_scores[st:ed] = p
+                p_scores[st:ed] = (cov / (X_std * y_std)).abs()
 
             # -------- q_ij, r_ij: 후보마다 스칼라 계산 (벡터화 가능) --------
             # q: mie/fe_out + msj/fs_in
