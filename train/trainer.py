@@ -112,7 +112,7 @@ class STLSTMLM(L.LightningModule):
         mask = (y_true > 0).float()
         den = torch.clamp(mask.sum(), min=1.0)
         
-        mse = torch.mean((y_true - y_pred) ** 2) / den
+        mse = ((y_true-y_pred)**2 * mask).sum() / mask.sum()
         mae = torch.mean(torch.abs(y_true - y_pred)) / den
         denom = torch.clamp(torch.abs(y_true), min=self.mape_eps)
         mape = torch.mean(torch.abs((y_true - y_pred) / denom)) * 100.0

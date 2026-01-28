@@ -84,7 +84,7 @@ def main():
         pred_size=args.pred_size,
         target_s=args.target_s,
         target_e=args.target_e,
-        a=args.a,
+        a=3,
         day_cluster_path="day_cluster.npy",
         top_x_od_path="top_x_od.npy",
         W_path="W.npy"
@@ -117,7 +117,8 @@ def main():
     model = STLSTM(
         input_dim=input_dim,
         hidden_dim=args.hidden_dim,
-        num_layers=args.num_layers
+        num_layers=args.num_layers,
+        pred_size=args.pred_size
     )
 
     lightning_module = STLSTMLM(

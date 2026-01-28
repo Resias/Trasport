@@ -1317,39 +1317,3 @@ if __name__ == "__main__":
     # print("\n=== Time Encoding Check ===")
     # print("time_enc_hist[0]:", batch["time_enc_hist"][0][:5])
     # print("\nDataset test complete.")
-    
-    
-    print("=== ST-LSTM Dataset Test Start ===")
-    
-    # get_st_lstm_dataset 호출
-    # (dist_matrix, W_matrix는 없으면 내부에서 더미 생성)
-    trainset, valset = get_st_lstm_dataset(
-        data_root=args.data_root,
-        train_subdir=args.train_dir,
-        val_subdir=args.val_dir,
-        window_size=args.window_size,
-        hop_size=args.hop_size,
-        pred_size=args.pred_size,
-        target_s=args.target_s,
-        target_e=args.target_e,
-        top_k=args.top_k
-    )
-
-    print(f"\nTrain samples : {len(trainset)}")
-    print(f"Val samples   : {len(valset)}")
-
-    # Loader 생성
-    train_loader = DataLoader(trainset, batch_size=args.batch_size, shuffle=True)
-    
-    # 배치 확인
-    batch = next(iter(train_loader))
-    print("\n=== Sample Batch (ST-LSTM) ===")
-    print(f"Input x shape: {batch['x'].shape}  (Batch, Window, Features)")
-    print(f"Target y shape: {batch['y'].shape} (Batch, Pred_Size, 1)")
-    
-    # Feature Dimension 계산 검증
-    # Expected: 1(Self) + K(Neighbors) + 1(S_In) + 1(E_Out) + 2(Time) + 7(Weekday)
-    expected_dim = 1 + args.top_k + 1 + 1 + 2 + 7
-    print(f"Feature Dim Check: {batch['x'].shape[-1]} (Expected: {expected_dim})")
-    
-    print("\nDataset test complete.")
