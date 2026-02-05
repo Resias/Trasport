@@ -255,6 +255,8 @@ class GATTransformerODWeek(nn.Module):
             ff_dim=gat_hid_dim * 4,
             num_layers=decode_num_layers
         )
+        self.origin_proj = nn.Linear(gat_hid_dim, gat_hid_dim)
+        self.dest_proj = nn.Linear(gat_hid_dim, gat_hid_dim)
 
     def forward(self, adjency_edge_index, batch_graph, B, T, time_enc_hist, weekday_tensor):
         N = self.num_nodes
@@ -297,8 +299,9 @@ class GATTransformerODWeek(nn.Module):
 
         preds = []
         for t in range(self.future_steps):
-            H = dec_out[t]
-            preds.append(H @ H.transpose(-1, -2))
+            H_O = self.origin_proj(dec_out[t])    # [B, N, d]
+            H_D = self.dest_proj(dec_out[t])      # [B, N, d]
+            preds.append(H_O @ H_D.transpose(-1, -2))  # asymmetric
 
         return torch.stack(preds, dim=1)
 

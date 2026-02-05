@@ -1,6 +1,7 @@
 # dataset.py
 import os
 import re
+import math
 import datetime
 import argparse
 import numpy as np
@@ -65,20 +66,25 @@ def graph_week_collate_fn(batch, static_edge_index):
     return static_edge_index, batch_graph, B, T, labels, time_enc_hist, weekday
 
 
-def build_time_sin_cos(minute_indices, period=1440):
-    """
-    minute_indices: 1D numpy array or list of int (분단위 인덱스, 0~1439)
-    period: 하나의 주기 길이 (1440분 = 24시간)
+# def build_time_sin_cos(minute_indices, period=1440):
+#     """
+#     minute_indices: 1D numpy array or list of int (분단위 인덱스, 0~1439)
+#     period: 하나의 주기 길이 (1440분 = 24시간)
     
-    return: [T, 2] tensor (sin, cos)
-    """
-    minute_indices = np.asarray(minute_indices, dtype=np.float32)
-    # 0~2π 스케일로 변환
-    angles = 2.0 * np.pi * minute_indices / float(period)
-    sin_vals = np.sin(angles)
-    cos_vals = np.cos(angles)
-    enc = np.stack([sin_vals, cos_vals], axis=-1)  # [T, 2]
-    return torch.tensor(enc, dtype=torch.float32)
+#     return: [T, 2] tensor (sin, cos)
+#     """
+#     minute_indices = np.asarray(minute_indices, dtype=np.float32)
+#     # 0~2π 스케일로 변환
+#     angles = 2.0 * np.pi * minute_indices / float(period)
+#     sin_vals = np.sin(angles)
+#     cos_vals = np.cos(angles)
+#     enc = np.stack([sin_vals, cos_vals], axis=-1)  # [T, 2]
+#     return torch.tensor(enc, dtype=torch.float32)
+
+def torch_time_sin_cos(minute_tensor, period=1440):
+    minute = minute_tensor.float()
+    angle = 2 * math.pi * minute / period
+    return torch.stack([torch.sin(angle), torch.cos(angle)], dim=-1)
 
 
 def weekday_onehot(weekday):
@@ -526,8 +532,8 @@ class MetroDataset(Dataset):
             + (s + self.window_size) * self.time_resolution
         ) % 1440
 
-        time_enc_hist = build_time_sin_cos(hist_minutes.numpy())
-        time_enc_fut = build_time_sin_cos(fut_minutes.numpy())
+        time_enc_hist = torch_time_sin_cos(hist_minutes)
+        time_enc_fut = torch_time_sin_cos(fut_minutes)
 
         return {
             "x_tensor": x,                      # (T_in, N, N)
@@ -856,30 +862,50 @@ class MetroODHyperDataset(Dataset):
         # self.day_end = 24 * 60         # 1440
         self.day_start = 6 * 60        # 360
         self.day_end = 23 * 60         # 1380
+        
+        # -----------------------------
+        # OD index tensors (CRITICAL)
+        # -----------------------------
+        pairs = np.array(valid_od_pairs)
+        self.src_idx = torch.tensor(pairs[:, 0], dtype=torch.long)
+        self.dst_idx = torch.tensor(pairs[:, 1], dtype=torch.long)
+        print(f"[Dataset] OD vertices: {self.V}")
 
+
+        # -----------------------------
+        # Load daily OD matrices
+        # -----------------------------
         file_names = sorted(os.listdir(data_root))
         self.data_paths = [os.path.join(data_root, f) for f in file_names]
 
-        # ---------- load data ----------
         self.day_data_cache = []
-        for path in self.data_paths:
+
+        for path in tqdm(self.data_paths, desc="Loading OD days"):
             arr = np.load(path, mmap_mode='r')  # (1440, N, N)
+
             if cache_in_mem:
                 arr = torch.tensor(arr, dtype=torch.float32)
+
             self.day_data_cache.append(arr)
 
-        # ---------- build index ----------
+        # -----------------------------
+        # Build temporal index
+        # -----------------------------
         self.index = []
-        for day_idx, file_name in tqdm(enumerate(file_names), desc="Building MetroODHyperDataset index"):
+
+        for day_idx, file_name in tqdm(enumerate(file_names), desc="Building index"):
             ymd = file_name.split('_')[-1].split('.')[0]
-            date = datetime.date(int(ymd[:4]), int(ymd[4:6]), int(ymd[6:8]))
+            date = datetime.date(
+                int(ymd[:4]),
+                int(ymd[4:6]),
+                int(ymd[6:8])
+            )
 
             for t in range(
                 self.day_start + self.m,
                 self.day_end,
                 self.hop_size
             ):
-                # periodicity requires previous days
                 if day_idx < self.n:
                     continue
 
@@ -889,21 +915,14 @@ class MetroODHyperDataset(Dataset):
                     "weekday": date.weekday()
                 })
 
+        print(f"[Dataset] Total samples: {len(self.index)}")
+
     def __len__(self):
         return len(self.index)
 
     def _extract_od_vector(self, day_data, t):
-        """
-        day_data: (1440, N, N)
-        return: (|V|)
-        """
-        vec = torch.zeros(self.V)
-        mat = day_data[t]
-
-        for (i, j), vid in self.od2vid.items():
-            vec[vid] = mat[i, j]
-
-        return vec
+        mat = day_data[t]  # (N,N)
+        return mat[self.src_idx, self.dst_idx]
 
     def __getitem__(self, idx):
         info = self.index[idx]
@@ -1030,8 +1049,7 @@ class ODFormerMetroDataset(Dataset):
 
         if self.use_time_feature and not is_target:
             minute = torch.tensor(minute_idx) % 1440
-            time_enc = build_time_sin_cos(minute.numpy())
-            time_enc = torch.tensor(time_enc, dtype=torch.float32)
+            time_enc = torch_time_sin_cos(minute)
             time_enc = time_enc.view(T, 1, 1, -1).expand(T, N, N, -1)
             feats.append(time_enc)
 

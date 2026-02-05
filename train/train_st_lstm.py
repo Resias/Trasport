@@ -141,7 +141,7 @@ def main():
         devices=1,
         max_epochs=args.max_epochs,
         logger=wandb_logger,
-        log_every_n_steps=50
+        log_every_n_steps=10
     )
 
     trainer.fit(lightning_module, train_loader, val_loader)
