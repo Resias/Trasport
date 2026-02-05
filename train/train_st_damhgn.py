@@ -41,8 +41,8 @@ def parse_args():
     # -------------------------
     # Training
     # -------------------------
-    parser.add_argument("--batch_size", type=int, default=128)
-    parser.add_argument("--num_workers", type=int, default=2)
+    parser.add_argument("--batch_size", type=int, default=16)
+    parser.add_argument("--num_workers", type=int, default=6)
     parser.add_argument("--lr", type=float, default=7.5e-4)
     parser.add_argument("--max_epochs", type=int, default=200)
 
@@ -84,7 +84,7 @@ def main():
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=args.num_workers,
-        pin_memory=True
+        pin_memory=False
     )
 
     val_loader = DataLoader(
@@ -92,7 +92,7 @@ def main():
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
-        pin_memory=True
+        pin_memory=False
     )
 
     # --------------------------------------------------
@@ -147,7 +147,7 @@ def main():
     trainer = L.Trainer(
         accelerator=DEVICE,
         devices=1,
-        precision=32,
+        precision="16-mixed",
         max_epochs=200,
         callbacks=callbacks,
         logger=wandb_logger,

@@ -24,10 +24,10 @@ class HyperSageLayer(nn.Module):
         X          : (B, |V|, F)
         hyperedges : List[List[int]]
         """
-        B, V, F = X.shape
+        B, V, _F = X.shape
         device = X.device
 
-        Xe = torch.zeros(B, V, F, device=device)
+        Xe = torch.zeros(B, V, _F, device=device)
         Nv = torch.zeros(V, device=device)
         
         for e in hyperedges:
