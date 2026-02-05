@@ -1034,25 +1034,27 @@ class ODFormerMetroDataset(Dataset):
         return len(self.indices)
 
     def _build_feature(self, od, minute_idx, is_target=False):
-        """
-        od: (T, N, N)
-        return: (T, N, N, F)
-        """
         T, N, _ = od.shape
-
-        # ===== 논문 전처리 =====
+        
+        # ✅ 98% clipping
         od = torch.clamp(od, max=self.clip_value)
-        od = torch.log1p(od)
-        # =====================
-
+        
+        # ✅ Natural log (논문 faithful)
+        # Safe version: avoid log(0)
+        od = torch.log(od.clamp(min=1.0))  # log(max(x, 1))
+        
+        # 또는 log1p 유지 (실용적)
+        # od = torch.log1p(od)
+        
         feats = [od.unsqueeze(-1)]
-
+        
         if self.use_time_feature and not is_target:
+            # Time encoding
             minute = torch.tensor(minute_idx) % 1440
             time_enc = torch_time_sin_cos(minute)
             time_enc = time_enc.view(T, 1, 1, -1).expand(T, N, N, -1)
             feats.append(time_enc)
-
+        
         return torch.cat(feats, dim=-1)
 
     def __getitem__(self, idx):
