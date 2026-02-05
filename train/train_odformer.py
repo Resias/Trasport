@@ -41,7 +41,7 @@ def main():
     parser.add_argument("--alpha", type=float, default=0.7)
 
     # training
-    parser.add_argument("--batch_size", type=int, default=16)
+    parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--max_epochs", type=int, default=100)
     parser.add_argument("--num_workers", type=int, default=4)

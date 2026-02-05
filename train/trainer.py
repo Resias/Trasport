@@ -1,7 +1,7 @@
 import pytorch_lightning as L
 import torch
 from torch.optim import Adam
-from SCIE_Benchmark.ODFormer import build_laplacian
+from SCIE_Benchmark.ODFormer import build_scaled_laplacian
 
 def smape(y_true, y_pred, eps=1e-3):
     denom = (torch.abs(y_true) + torch.abs(y_pred)).clamp(min=eps)
@@ -411,7 +411,7 @@ class ODformerLM(L.LightningModule):
         self.lr = lr
         self.loss_fn = torch.nn.MSELoss()
         self.mape_eps = mape_eps
-        L = build_laplacian(adj_matrix)
+        L = build_scaled_laplacian(adj_matrix)
         self.register_buffer("L_origin", L)
         self.register_buffer("L_destination", L.clone())
 
@@ -425,6 +425,7 @@ class ODformerLM(L.LightningModule):
         """
         y_true, y_pred: (B, |V|)
         """
+        # Option 1: log1p 사용 시
         y_pred = torch.expm1(y_pred)
         y_true = torch.expm1(y_true)
         mask = (y_true > 0).float()
