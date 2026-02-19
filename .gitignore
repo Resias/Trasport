@@ -12,3 +12,7 @@ day_cluster.npy
 top_x_od.npy
 W.npy
 metro-st-damhgn/
+metro-odformer/
+metro-GCN-LSTM/
+metro-GATrasformer-od-week-latlon/
+metro-AutoformerOD/

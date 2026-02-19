@@ -16,10 +16,8 @@ from dataset import get_odformer_dataset
 from SCIE_Benchmark.ODFormer import ODFormer   # 네가 구현한 ODFormer
 from trainer import ODformerLM
 
-
 def resolve_accelerator():
     return "cuda" if torch.cuda.is_available() else "cpu"
-
 
 def main():
     parser = argparse.ArgumentParser()
@@ -41,14 +39,14 @@ def main():
     parser.add_argument("--alpha", type=float, default=0.7)
 
     # training
-    parser.add_argument("--batch_size", type=int, default=4)
-    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--max_epochs", type=int, default=100)
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--use_ddp", action="store_true")
 
     # logging
-    parser.add_argument("--wandb_project", default="odformer-metro")
+    parser.add_argument("--wandb_project", default="metro-odformer")
 
     args = parser.parse_args()
 
@@ -74,7 +72,8 @@ def main():
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=args.num_workers,
-        pin_memory=True
+        pin_memory=True,
+        persistent_workers=True
     )
 
     val_loader = DataLoader(
@@ -82,7 +81,8 @@ def main():
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
-        pin_memory=True
+        pin_memory=True,
+        persistent_workers=True
     )
 
     # =====================
@@ -120,7 +120,6 @@ def main():
 
     run_name = f"ODformer_T{args.window_size}_P{args.pred_size}_{datetime.datetime.now():%Y%m%d_%H%M}"
 
-
     early_stop = EarlyStopping(
         monitor="val/loss",
         patience=3,          # 논문 기준: 8 epoch 이내 수렴
@@ -142,11 +141,11 @@ def main():
         logger=logger,
         callbacks=[early_stop],
         log_every_n_steps=10,
-        gradient_clip_val=1.0
+        gradient_clip_val=1.0,
+        precision="16-mixed",
     )
 
     trainer.fit(lm, train_loader, val_loader)
-
 
 if __name__ == "__main__":
     main()

@@ -112,19 +112,31 @@ class TemporalProjector(nn.Module):
         return self.proj(x)       # (B,T,d_model)
 
 class ODAttention(nn.Module):
-    def __init__(self, num_regions, feature_dim, hidden_dim):
+    def __init__(self, num_regions, feature_dim, hidden_dim=128):
         super().__init__()
         self.N = num_regions
         self.f = feature_dim
         
-        # [수정됨] 차원 크기 변경: self.f -> self.N * self.f
-        # Origin input X는 (BT, N * f) 크기이므로 가중치도 이에 맞춰야 합니다.
-        self.W1_o = nn.Parameter(torch.randn(self.N, self.N, self.N * self.f))
+        # 1911차원 -> 128차원(hidden_dim)으로 압축하여 연산
+        self.proj_dim = hidden_dim 
+        
+        # [수정 2] Input Projection Layer (차원 축소용)
+        # (N * F) -> (proj_dim)
+        self.input_proj_o = nn.Linear(self.N * self.f, self.proj_dim)
+        self.input_proj_d = nn.Linear(self.N * self.f, self.proj_dim)
+
+        # [수정 3] 가중치 파라미터 크기 축소
+        # 기존: (N, N, N*F) -> 약 7.7억개 (GPU 터짐)
+        # 변경: (N, N, proj_dim) -> 약 2,600만개 (현실적)
+        self.W1_o = nn.Parameter(torch.randn(self.N, self.N, self.proj_dim))
         self.b_omega = nn.Parameter(torch.zeros(self.N, self.N))
         
-        # [수정됨] 차원 크기 변경: self.f -> self.N * self.f
-        self.W1_d = nn.Parameter(torch.randn(self.N, self.N, self.N * self.f))
+        self.W1_d = nn.Parameter(torch.randn(self.N, self.N, self.proj_dim))
         self.b_delta = nn.Parameter(torch.zeros(self.N, self.N))
+
+        # 초기화 (학습 안정성을 위해)
+        nn.init.xavier_uniform_(self.W1_o)
+        nn.init.xavier_uniform_(self.W1_d)
 
     def _sparse_mask(self, scores):
         """
@@ -150,45 +162,51 @@ class ODAttention(nn.Module):
         mask.scatter_(1, top_idx.unsqueeze(-1).expand(-1, -1, self.N), 1.0)
         
         return mask
-
     def forward(self, M):
         B, T, N, _, Fdim = M.shape
         BT = B * T
         
-        # Origin vectors
+        # ------------------------------------------------
+        # Origin Attention
+        # ------------------------------------------------
+        # 1. 입력 벡터 구성: (BT, N, N*F)
         X = M.reshape(BT, N, N*Fdim)
         
-        # --- Origin Attention ---
-        omega_raw = torch.zeros(BT, N, N, device=M.device)
-        for i in range(N):
-            for j in range(N):
-                # X[:, i]: (BT, N*F)
-                # W1_o[i, j]: (N*F) -> 수정된 차원
-                # 결과: (BT)
-                omega_raw[:, i, j] = (X[:, i] @ self.W1_o[i, j]) # .sum(dim=-1) 제거 (dot product 결과는 이미 scalar)
+        # [수정 4] 차원 축소 (Projection)
+        # (BT, N, N*F) -> (BT, N, proj_dim)
+        X_proj = self.input_proj_o(X) 
         
+        # 2. Attention Score 계산 (축소된 벡터 사용)
+        # 최적화된 연산 (Loop 대신 einsum 사용 가능하지만, 메모리 안전을 위해 Loop 유지)
+        # X_proj[:, i]: (BT, proj_dim)
+        # W1_o[i, j]:   (proj_dim)
+        omega_raw = torch.einsum('bid,ijd->bij', X_proj, self.W1_o)
         omega_raw = omega_raw + self.b_omega
         
-        # Apply Entropy Masking
+        # 3. Masking & Softmax
         mask_o = self._sparse_mask(omega_raw)
         omega = F.softmax(torch.sigmoid(omega_raw), dim=-1) * mask_o
         
-        # --- Destination Attention ---
+        # ------------------------------------------------
+        # Destination Attention
+        # ------------------------------------------------
+        # 1. 입력 벡터 구성 (Transpose)
         Y = M.permute(0, 1, 3, 2, 4).reshape(BT, N, N*Fdim)
-        delta_raw = torch.zeros(BT, N, N, device=M.device)
-        for i in range(N):
-            for j in range(N):
-                # Y[:, i]: (BT, N*F)
-                # W1_d[i, j]: (N*F)
-                delta_raw[:, i, j] = (Y[:, i] @ self.W1_d[i, j])
         
+        # [수정 4] 차원 축소
+        Y_proj = self.input_proj_d(Y)
+        
+        # 2. Attention Score 계산
+        delta_raw = torch.einsum('bid,ijd->bij', Y_proj, self.W1_d)
         delta_raw = delta_raw + self.b_delta
         
-        # Apply Entropy Masking
+        # 3. Masking & Softmax
         mask_d = self._sparse_mask(delta_raw)
         delta = F.softmax(torch.sigmoid(delta_raw), dim=-1) * mask_d
 
-        # M_A = Omega * M * Delta
+        # ------------------------------------------------
+        # Final Aggregation: M_A = Omega * M * Delta
+        # ------------------------------------------------
         M_flat = M.view(BT, N, N, Fdim)
         out = torch.einsum('bio,bojf,bjd->bidf', omega, M_flat, delta)
         

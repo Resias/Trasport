@@ -92,7 +92,6 @@ class MetroLM(L.LightningModule):
         optim = Adam(self.parameters(), lr=self.lr)
         return optim
    
-
 class STLSTMLM(L.LightningModule):
     def __init__(self, model, loss, lr=1e-3, pred_size=30, mape_eps=1e-3):
         super().__init__()
@@ -105,149 +104,57 @@ class STLSTMLM(L.LightningModule):
     def forward(self, x):
         return self.model(x)
     
+
     def _compute_metrics(self, y_true, y_pred):
-        y_true = y_true.squeeze(-1)
-        # y_pred is already (B, Pred) due to FC output_dim
-        
-        mask = (y_true > 0).float()
-        mask_sum = mask.sum()
+        diff = y_true - y_pred
 
-        if mask_sum < 1:
-            return None  # skip batch
-
-        diff = (y_pred - y_true)
-        mse = ((y_true - y_pred)**2 * mask).sum() / mask_sum
-        mae = (torch.abs(y_true - y_pred) * mask).sum() / mask_sum
-        
-        denom = torch.clamp(torch.abs(y_true), min=self.mape_eps)
-        mape = torch.mean(torch.abs((y_true - y_pred) / denom)) * 100.0
-
-        denom2 = (y_true.abs() + y_pred.abs()).clamp(min=self.mape_eps)
-        smape_ = (2 * diff.abs() / denom2 * mask).sum() / mask_sum * 100.0
-        
+        # ----- core metrics (no masking) -----
+        mse = torch.mean(diff ** 2)
         rmse = torch.sqrt(mse)
-        return mse, mae, mape, smape_, rmse, mask_sum  # mask_sum 같이 넘김(가중 로깅용)
-    
-    def training_step(self, batch, batch_idx):
-        x = batch['x']
-        y = batch['y'].squeeze(-1)
-        y_pred = self(x)
-        loss = self.loss_fn(y_pred, y)
-        self.log("train_loss", loss, prog_bar=True)
-        return loss
-    
-    def validation_step(self, batch, batch_idx):
-        x = batch['x']
-        y = batch['y'].squeeze(-1)
-        y_pred = self(x)
-        metrics = self._compute_metrics(y, y_pred)
-        if metrics is None:
-            return  # <- 이게 정답. log도 안 하고 return도 안 함.
-        mse, mae, mape, smape_, rmse, mask_sum = metrics
-        bs = int(mask_sum.item())
-        self.log("val_mse", mse, prog_bar=True, on_step=False, batch_size=bs)
-        self.log("val_mae", mae, prog_bar=True, on_step=False, batch_size=bs)
-        self.log("val_mape", mape, prog_bar=True, on_step=False, batch_size=bs)
-        self.log("val_smape", smape_, prog_bar=True, on_step=False, batch_size=bs)
-        self.log("val_rmse", rmse, prog_bar=True, on_step=False, batch_size=bs)
-        
-        return mse
-    
-    def configure_optimizers(self):
-        return Adam(self.parameters(), lr=self.lr)
+        mae = torch.mean(torch.abs(diff))
 
-class MPGCNLM(L.LightningModule):
-    def __init__(self, model, loss, lr=1e-3, pred_size=1, mape_eps=1e-3):
-        super().__init__()
-        self.model = model
-        self.loss_fn = loss
-        self.lr = lr
-        self.pred_size = pred_size
-        self.mape_eps = mape_eps
-        
-    def construct_dynamic_graph(self, x):
-        """
-        Construct Sample-wise Dynamic Graph based on Cosine Similarity.
-        [cite_start][cite: 1353-1355]
-        x: (B, T, N, N)
-        Returns: adj_O (B, N, N), adj_D (B, N, N)
-        """
-        B, T, N, _ = x.shape
-        
-        # Average over time window for each sample
-        flow_mean = x.mean(dim=1) # (B, N, N)
-        
-        # 1. Origin Dynamic Graph (Similarity between Origins for each sample)
-        # norm: (B, N, 1)
-        norm_O = torch.norm(flow_mean, p=2, dim=2, keepdim=True) + 1e-6
-        normalized_flow_O = flow_mean / norm_O
-        # Batch Matrix Multiplication: (B, N, N) @ (B, N, N)^T -> (B, N, N)
-        adj_O = torch.bmm(normalized_flow_O, normalized_flow_O.transpose(1, 2))
-        
-        # 2. Destination Dynamic Graph
-        flow_mean_T = flow_mean.transpose(1, 2) # (B, N, N)
-        norm_D = torch.norm(flow_mean_T, p=2, dim=2, keepdim=True) + 1e-6
-        normalized_flow_D = flow_mean_T / norm_D
-        adj_D = torch.bmm(normalized_flow_D, normalized_flow_D.transpose(1, 2))
-        
-        return adj_O, adj_D
+        # ----- MAPE (only where y_true > 0) -----
+        mask = y_true > 0
+        if mask.any():
+            mape = torch.mean(
+                torch.abs(diff[mask] / torch.clamp(y_true[mask], min=self.mape_eps))
+            ) * 100.0
+        else:
+            mape = torch.tensor(0.0, device=y_true.device)
 
-    def forward(self, x):
-        # 1. Dynamic Graph Construction (Per Sample)
-        with torch.no_grad():
-            dyn_adj_O, dyn_adj_D = self.construct_dynamic_graph(x)
-            
-            # Thresholding (Optional, for sparsity)
-            dyn_adj_O = torch.where(dyn_adj_O > 0.5, dyn_adj_O, torch.zeros_like(dyn_adj_O))
-            dyn_adj_D = torch.where(dyn_adj_D > 0.5, dyn_adj_D, torch.zeros_like(dyn_adj_D))
-
-        # 2. Model Forward (Passing Batch of Graphs)
-        # model expects (B, N, N) dynamic graphs
-        y_pred = self.model(x, dynamic_adj_O=dyn_adj_O, dynamic_adj_D=dyn_adj_D)
-        return y_pred
-
-    def _compute_metrics(self, y_true, y_pred):
-        y_true = y_true.squeeze(-1)
-        # y_pred is already (B, Pred) due to FC output_dim
-        
-        mse = torch.mean((y_true - y_pred) ** 2)
-        mae = torch.mean(torch.abs(y_true - y_pred))
-        denom = torch.clamp(torch.abs(y_true), min=self.mape_eps)
-        mape = torch.mean(torch.abs((y_true - y_pred) / denom)) * 100.0
+        # ----- sMAPE (standard definition) -----
         smape_ = smape(y_true, y_pred, eps=self.mape_eps)
-        rmse = torch.sqrt(mse)
+
         return mse, mae, mape, smape_, rmse
     
     def training_step(self, batch, batch_idx):
         x = batch['x']
-        y = batch['y'] # (B, Pred, N, N)
-        
-        y_pred = self(x) # (B, N, N)
-        
-        if y_pred.dim() == 3: y_pred = y_pred.unsqueeze(1)
-        
+        y = batch['y'].squeeze(-1)
+        y_pred = self(x)
         loss = self.loss_fn(y_pred, y)
-        self.log("train_loss", loss, prog_bar=True, on_step=True, on_epoch=True)
+        self.log("train/loss", loss, prog_bar=True)
         return loss
-
+    
     def validation_step(self, batch, batch_idx):
         x = batch['x']
-        y = batch['y']
-        
+        y = batch['y'].squeeze(-1)
         y_pred = self(x)
-        if y_pred.dim() == 3: y_pred = y_pred.unsqueeze(1)
+        loss = self.loss_fn(y_pred, y)
+        metrics = self._compute_metrics(y, y_pred)
+        if metrics is None:
+            return  # <- 이게 정답. log도 안 하고 return도 안 함.
+        mse, mae, mape, smape_, rmse = metrics
+        self.log("val/loss", loss, prog_bar=True, on_step=False)
+        self.log("val/mse", mse, prog_bar=True, on_step=False)
+        self.log("val/mae", mae, prog_bar=True, on_step=False)
+        self.log("val/mape", mape, prog_bar=True, on_step=False)
+        self.log("val/smape", smape_, prog_bar=True, on_step=False)
+        self.log("val/rmse", rmse, prog_bar=True, on_step=False)
         
-        mse, mae, mape, smape_, rmse = self._compute_metrics(y, y_pred)
-        self.log("val_mse", mse, prog_bar=True)
-        self.log("val_mae", mae, prog_bar=True)
-        self.log("val_mape", mape, prog_bar=True)
-        self.log("val_smape", smape_, prog_bar=True)
-        self.log("val_rmse", rmse, prog_bar=True)
-        return mse
-
+        return loss
+    
     def configure_optimizers(self):
         return Adam(self.parameters(), lr=self.lr)
-
 
 class MetroGraphLM(L.LightningModule):
     def __init__(self, model, loss=torch.nn.MSELoss(), lr=1e-3):
@@ -284,34 +191,68 @@ class MetroGraphLM(L.LightningModule):
 
 
 class MetroGraphWeekLM(L.LightningModule):
-    def __init__(self, model, loss=torch.nn.MSELoss(), lr=1e-3):
+    def __init__(self, model, loss=torch.nn.MSELoss(), lr=1e-3, mape_eps=1e-3):
         super().__init__()
         self.model = model
         self.loss_fn = loss
         self.lr = lr
+        self.mape_eps = mape_eps
 
-    def forward(self, static_edge_index, batch_graph, B, T):
-        return self.model(static_edge_index, batch_graph, B, T)
+    def forward(self, static_edge_index, batch_graph, B, T, time_enc_hist, time_enc_fut, weekday):
+        return self.model(static_edge_index, batch_graph, B, T, time_enc_hist, time_enc_fut, weekday)
 
+
+    def _compute_metrics(self, y_true, y_pred):
+        # back to original scale
+        y_true = torch.expm1(y_true)
+        y_pred = torch.expm1(y_pred)
+
+        diff = y_true - y_pred
+
+        # ----- core metrics (no masking) -----
+        mse = torch.mean(diff ** 2)
+        rmse = torch.sqrt(mse)
+        mae = torch.mean(torch.abs(diff))
+
+        # ----- MAPE (only where y_true > 0) -----
+        mask = y_true > 0
+        if not mask.any():
+            mape = torch.nan
+        else:
+            mape = torch.mean(
+                torch.abs(diff[mask] / torch.clamp(y_true[mask], min=self.mape_eps))
+            ) * 100.0
+
+        # ----- sMAPE (standard definition) -----
+        smape_ = smape(y_true, y_pred, eps=self.mape_eps)
+
+        return mse, mae, mape, smape_, rmse
+    
     def training_step(self, batch, batch_idx):
         # batch is a tuple from graph_collate_fn
-        static_edge_index, batch_graph, B, T, labels, time_enc_hist, weekday = batch
+        static_edge_index, batch_graph, B, T, labels, time_enc_hist, time_enc_fut, weekday = batch
 
         # forward
-        preds = self.model(static_edge_index, batch_graph, B, T, time_enc_hist, weekday)
+        preds = self.model(static_edge_index, batch_graph, B, T, time_enc_hist, time_enc_fut, weekday)
         loss = self.loss_fn(preds, labels)
 
         self.log("train/loss", loss, prog_bar=True)
         return loss
 
     def validation_step(self, batch, batch_idx):
-        static_edge_index, batch_graph, B, T, labels, time_enc_hist, weekday = batch
+        static_edge_index, batch_graph, B, T, labels, time_enc_hist, time_enc_fut, weekday = batch
 
         # forward
-        preds = self.model(static_edge_index, batch_graph, B, T, time_enc_hist, weekday)
+        preds = self.model(static_edge_index, batch_graph, B, T, time_enc_hist, time_enc_fut, weekday)
         loss = self.loss_fn(preds, labels)
+        mse, mae, mape, smape_, rmse = self._compute_metrics(labels, preds)
 
         self.log("val/loss", loss, prog_bar=True)
+        self.log("val/rmse", rmse, prog_bar=True)
+        self.log("val/mae", mae, prog_bar=True)
+        self.log("val/mape", mape, prog_bar=True)
+        self.log("val/smape", smape_, prog_bar=True)
+        self.log("val/mse", mse, prog_bar=True)
         return loss
 
     def configure_optimizers(self):
@@ -338,24 +279,30 @@ class STDAMHGNLitModule(L.LightningModule):
     # -------------------------
     # Metrics (paper-style)
     # -------------------------
+
     def _compute_metrics(self, y_true, y_pred):
-        """
-        y_true, y_pred: (B, |V|)
-        """
-        mask = (y_true > 0).float()
+        # back to original scale
+        y_true = torch.expm1(y_true)
+        y_pred = torch.expm1(y_pred)
 
-        mse = ((y_true - y_pred) ** 2 * mask).sum() / mask.sum()
-        mae = (torch.abs(y_true - y_pred) * mask).sum() / mask.sum()
+        diff = y_true - y_pred
 
-        denom = torch.clamp(torch.abs(y_true), min=self.mape_eps)
-        mape = (torch.abs((y_true - y_pred) / denom) * mask).sum() / mask.sum() * 100
-
-        smape_ = smape(
-            y_true * mask,
-            y_pred * mask,
-            eps=self.mape_eps
-        )
+        # ----- core metrics (no masking) -----
+        mse = torch.mean(diff ** 2)
         rmse = torch.sqrt(mse)
+        mae = torch.mean(torch.abs(diff))
+
+        # ----- MAPE (only where y_true > 0) -----
+        mask = y_true > 0
+        if mask.any():
+            mape = torch.mean(
+                torch.abs(diff[mask] / torch.clamp(y_true[mask], min=self.mape_eps))
+            ) * 100.0
+        else:
+            mape = torch.tensor(0.0, device=y_true.device)
+
+        # ----- sMAPE (standard definition) -----
+        smape_ = smape(y_true, y_pred, eps=self.mape_eps)
 
         return mse, mae, mape, smape_, rmse
 
@@ -403,7 +350,6 @@ class STDAMHGNLitModule(L.LightningModule):
     def configure_optimizers(self):
         return Adam(self.parameters(), lr=self.lr)
 
-
 class ODformerLM(L.LightningModule):
     def __init__(self, model, adj_matrix, lr=1e-4, mape_eps=1e-3):
         super().__init__()
@@ -421,28 +367,30 @@ class ODformerLM(L.LightningModule):
     # -------------------------
     # Metrics (paper-style)
     # -------------------------
+
     def _compute_metrics(self, y_true, y_pred):
-        """
-        y_true, y_pred: (B, |V|)
-        """
-        # Option 1: log1p 사용 시
-        y_pred = torch.expm1(y_pred)
+        # back to original scale
         y_true = torch.expm1(y_true)
-        mask = (y_true > 0).float()
-        den = torch.clamp(mask.sum(), min=1.0)
+        y_pred = torch.expm1(y_pred)
 
-        mse = ((y_true - y_pred) ** 2 * mask).sum() / den
-        mae = (torch.abs(y_true - y_pred) * mask).sum() / den
+        diff = y_true - y_pred
 
-        denom = torch.clamp(torch.abs(y_true), min=self.mape_eps)
-        mape = (torch.abs((y_true - y_pred) / denom) * mask).sum() / den * 100
-
-        smape_ = smape(
-            y_true * mask,
-            y_pred * mask,
-            eps=self.mape_eps
-        )
+        # ----- core metrics (no masking) -----
+        mse = torch.mean(diff ** 2)
         rmse = torch.sqrt(mse)
+        mae = torch.mean(torch.abs(diff))
+
+        # ----- MAPE (only where y_true > 0) -----
+        mask = y_true > 0
+        if not mask.any():
+            mape = torch.nan
+        else:
+            mape = torch.mean(
+                torch.abs(diff[mask] / torch.clamp(y_true[mask], min=self.mape_eps))
+            ) * 100.0
+
+        # ----- sMAPE (standard definition) -----
+        smape_ = smape(y_true, y_pred, eps=self.mape_eps)
 
         return mse, mae, mape, smape_, rmse
 
@@ -472,12 +420,13 @@ class ODformerLM(L.LightningModule):
             Y, preds
         )
 
-        self.log("val_mse", mse, prog_bar=True)
-        self.log("val_mae", mae, prog_bar=True)
-        self.log("val_mape", mape, prog_bar=True)
-        self.log("val_smape", smape_, prog_bar=True)
-        self.log("val_rmse", rmse, prog_bar=True)
         self.log("val/loss", loss, prog_bar=True)
+        self.log("val/rmse", rmse, prog_bar=True)
+        self.log("val/mape", mape, prog_bar=True)
+        self.log("val/smape", smape_, prog_bar=True)
+        self.log("val/mse", mse, prog_bar=True)
+        self.log("val/mae", mae, prog_bar=True)
+        
         return loss
 
     def configure_optimizers(self):
@@ -492,3 +441,124 @@ class ODformerLM(L.LightningModule):
                 "monitor": "val/loss"
             }
         }
+
+class MetroGCNLSTMLM(L.LightningModule):
+    def __init__(self, model, lr=1e-3, mape_eps=1e-3):
+        super().__init__()
+        self.model = model
+        self.lr = lr
+        self.mape_eps = mape_eps
+        self.loss_fn = torch.nn.MSELoss()
+
+    def forward(self, x):
+        return self.model(x)
+
+    def _compute_metrics(self, y_true, y_pred):
+        # back to original scale
+        y_true = torch.expm1(y_true)
+        y_pred = torch.expm1(y_pred)
+
+        diff = y_true - y_pred
+
+        mse = torch.mean(diff ** 2)
+        rmse = torch.sqrt(mse)
+        mae = torch.mean(torch.abs(diff))
+
+        mask = y_true > 0
+        if not mask.any():
+            mape = torch.nan
+        else:
+            mape = torch.mean(
+                torch.abs(diff[mask] / torch.clamp(y_true[mask], min=self.mape_eps))
+            ) * 100.0
+
+        smape_ = smape(y_true, y_pred, eps=self.mape_eps)
+
+        return mse, mae, mape, smape_, rmse
+
+    def training_step(self, batch, batch_idx):
+        x, y = batch
+        preds = self.model(x)
+        loss = self.loss_fn(preds, y)
+
+        self.log("train/loss", loss, prog_bar=True)
+        return loss
+
+    def validation_step(self, batch, batch_idx):
+        x, y = batch
+        preds = self.model(x)
+        loss = self.loss_fn(preds, y)
+
+        mse, mae, mape, smape_, rmse = self._compute_metrics(y, preds)
+
+        self.log("val/loss", loss, prog_bar=True)
+        self.log("val/rmse", rmse, prog_bar=True)
+        self.log("val/mae", mae, prog_bar=True)
+        self.log("val/mape", mape, prog_bar=True)
+        self.log("val/smape", smape_, prog_bar=True)
+        self.log("val/mse", mse, prog_bar=True)
+
+        return loss
+
+    def configure_optimizers(self):
+        return torch.optim.Adam(self.model.parameters(), lr=self.lr)
+
+class MetroAutoformerODLM(L.LightningModule):
+    def __init__(self, model, lr=1e-4, mape_eps=1e-3):
+        super().__init__()
+        self.model = model
+        self.lr = lr
+        self.mape_eps = mape_eps
+        self.loss_fn = torch.nn.MSELoss()
+
+    def forward(self, batch):
+        return self.model(
+            x_log=batch["x"],
+            time_enc_hist=batch["time_hist"],
+            time_enc_fut=batch["time_fut"],
+            weekday=batch["weekday"],
+        )
+
+    def _compute_metrics(self, y_true, y_pred):
+        y_true = torch.expm1(y_true)
+        y_pred = torch.expm1(y_pred)
+
+        diff = y_true - y_pred
+        mse = torch.mean(diff ** 2)
+        rmse = torch.sqrt(mse)
+        mae = torch.mean(torch.abs(diff))
+
+        mask = y_true > 0
+        if mask.any():
+            mape = torch.mean(
+                torch.abs(diff[mask] / torch.clamp(y_true[mask], min=self.mape_eps))
+            ) * 100.0
+        else:
+            mape = torch.nan
+
+        smape_ = smape(y_true, y_pred, eps=self.mape_eps)
+        return mse, mae, mape, smape_, rmse
+
+    def training_step(self, batch, batch_idx):
+        preds = self(batch)
+        loss = self.loss_fn(preds, batch["y"])
+        self.log("train/loss", loss, prog_bar=True)
+        return loss
+
+    def validation_step(self, batch, batch_idx):
+        preds = self(batch)
+        loss = self.loss_fn(preds, batch["y"])
+
+        mse, mae, mape, smape_, rmse = self._compute_metrics(batch["y"], preds)
+
+        self.log("val/loss", loss, prog_bar=True)
+        self.log("val/rmse", rmse, prog_bar=True)
+        self.log("val/mae", mae, prog_bar=True)
+        self.log("val/mape", mape, prog_bar=True)
+        self.log("val/smape", smape_, prog_bar=True)
+        self.log("val/mse", mse, prog_bar=True)
+
+        return loss
+
+    def configure_optimizers(self):
+        return torch.optim.Adam(self.model.parameters(), lr=self.lr)
