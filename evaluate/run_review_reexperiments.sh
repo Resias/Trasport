@@ -22,7 +22,7 @@ echo "[Review rerun] study_name = $STUDY_NAME"
 echo "[Review rerun] seeds      = $SEEDS"
 
 echo "[1/5] Proposed S8_gate"
-python train/train_abligation.py \
+python train/train_ablation.py \
   --data_root "$DATA_ROOT" \
   --train_subdir train \
   --val_subdir val \

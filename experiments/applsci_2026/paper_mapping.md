@@ -44,9 +44,9 @@ The path spelling is historical. Keep it stable until checkpoint references are 
 
 These files are retained for now but classified as non-main-experiment cleanup candidates:
 
-- `SCIE_Benchmark/STDAMHGN.py`
-- `SCIE_Benchmark/hyper_graph_preprocessed.py`
-- `train/train_st_damhgn.py`
+- `archive/legacy_models/SCIE_Benchmark/STDAMHGN.py`
+- `archive/legacy_models/SCIE_Benchmark/hyper_graph_preprocessed.py`
+- `archive/legacy_models/train/train_st_damhgn.py`
 - `models/GNN.py`
 - `models/TransformerConv.py`
 - `inference_SCIE/infer_odformer.py`

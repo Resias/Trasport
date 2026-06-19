@@ -2,10 +2,11 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+STAGES="${STAGES:-${EXPERIMENT_NAMES:-S0_minimal,S1_factorization,S2_multiscale_static,S3_dynamic,S4_transformer,S5_time,S6_weekday,S7_geo,S8_gate}}"
 
-python "$ROOT/train/train_abligation.py" \
+python "$ROOT/train/train_ablation.py" \
   --experiment_plan progressive_core \
-  --experiment_names "${EXPERIMENT_NAMES:-S0_minimal,S1_factorization,S2_multiscale_static,S3_dynamic,S4_transformer,S5_time,S6_weekday,S7_geo,S8_gate}" \
+  --stages "$STAGES" \
   --seeds "${SEEDS:-0,1,2}" \
   --data_root "${DATA_ROOT:-$ROOT/data_splits/od_minute_review_3way}" \
   --train_subdir "${TRAIN_SUBDIR:-train}" \

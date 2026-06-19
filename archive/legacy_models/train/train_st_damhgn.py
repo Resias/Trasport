@@ -9,10 +9,14 @@ from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 
 import sys
 import os
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
+TRAIN_DIR = os.path.join(ROOT, "train")
+for path in (ROOT, TRAIN_DIR):
+    if path not in sys.path:
+        sys.path.append(path)
 
 from dataset import get_stdamhgn_dataset
-from SCIE_Benchmark.STDAMHGN import STDAMHGN
+from archive.legacy_models.SCIE_Benchmark.STDAMHGN import STDAMHGN
 from trainer import STDAMHGNLitModule
 
 

@@ -15,7 +15,7 @@ fi
 
 echo
 echo "[Active training processes]"
-pgrep -af 'run_review_reexperiments|run_review_reduced_50ep|train_abligation|train_odformer|train_mpgcn|train_gcn_lstm|train_autoformer|statistical_baselines_review|evaluate_review_checkpoints' || true
+pgrep -af 'run_review_reexperiments|run_review_reduced_50ep|train_ablation|train_abligation|train_odformer|train_mpgcn|train_gcn_lstm|train_autoformer|statistical_baselines_review|evaluate_review_checkpoints' || true
 
 echo
 echo "[Latest log]"

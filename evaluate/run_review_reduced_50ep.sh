@@ -86,7 +86,7 @@ else
 fi
 
 echo "[1/6] Proposed S8_gate"
-python train/train_abligation.py \
+python train/train_ablation.py \
   --data_root "$DATA_ROOT" \
   --train_subdir train \
   --val_subdir val \
