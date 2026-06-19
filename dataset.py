@@ -646,66 +646,148 @@ class STLSTMDataset(Dataset):
 # ==========================================
 class MPGCNDataset(Dataset):
     """
-    MPGCN용 데이터셋
-    Input: (Window, N, N) - 전체 네트워크의 OD 흐름
-    Output: (Pred, N, N) - 다음 시점의 전체 네트워크 OD 흐름
-    
-    [수정 사항]
-    - Log1p Normalization 제거 (Raw Flow 유지)
+    MPGCN benchmark dataset for OD matrix sequences.
+
+    It follows the same daily-file sliding-window convention as MetroDataset,
+    but also returns future dynamic-graph bin keys used by MPGCN rollout.
     """
-    def __init__(self, data_root, window_size, hop_size, pred_size):
+
+    def __init__(
+        self,
+        data_root,
+        window_size,
+        hop_size,
+        pred_size,
+        time_resolution,
+        dynamic_bin_size=60,
+        cache_in_mem=True,
+    ):
         super().__init__()
         self.data_root = data_root
-        self.window = window_size
-        self.hop = hop_size
-        self.pred = pred_size
-        
-        # 운영 시간 (05:30 ~ 24:00 -> 330 ~ 1440)
-        self.day_start = 330
-        self.day_end = 1440
-        
-        # 1. 데이터 로드 (Lazy Loading)
+        self.window_size = window_size
+        self.hop_size = hop_size
+        self.pred_size = pred_size
+        self.time_resolution = time_resolution
+        self.dynamic_bin_size = dynamic_bin_size
+        self.cache_in_mem = cache_in_mem
+
+        self.use_operating_hours = time_resolution < 60
+        self.day_start_minute = 5 * 60 + 30
+        self.day_end_minute = 24 * 60
+
+        if self.use_operating_hours:
+            self.day_start_step = self.day_start_minute // time_resolution
+            self.day_end_step = self.day_end_minute // time_resolution
+        else:
+            self.day_start_step = 0
+            self.day_end_step = None
+
+        file_names = sorted(
+            f for f in os.listdir(data_root)
+            if f.endswith(".npy")
+            and not f.endswith(".time.npy")
+            and not f.endswith(".mask.npy")
+        )
+        if len(file_names) == 0:
+            raise FileNotFoundError(f"No OD .npy files found in {data_root}")
+
+        self.file_names = file_names
+        self.data_paths = [os.path.join(data_root, f) for f in file_names]
+        self.day_data_cache = []
+        self.valid_masks = []
+
         print("[MPGCN] Loading OD matrices...")
-        file_names = sorted(os.listdir(data_root))
-        self.paths = [os.path.join(data_root, f) for f in file_names]
-        
-        self.OD = []
-        for path in self.paths:
-            # 전체 네트워크 OD (1440, N, N)
-            arr = np.load(path, mmap_mode='r') 
-            self.OD.append(arr)
-            
-        N = self.OD[0].shape[1]
-        print(f"[MPGCN] Loaded {len(self.OD)} days, N={N}")
-        
-        # 2. 인덱싱
-        self.index = []
-        safe_start = self.day_start + self.window 
-        
-        for d in range(len(self.OD)):
-            for t in range(safe_start, self.day_end - self.pred, self.hop):
-                self.index.append((d, t))
-                
-        print(f"[MPGCN] Total samples = {len(self.index)}")
-        
+        for path in tqdm(self.data_paths, desc="Loading MPGCN OD days"):
+            arr = np.load(path, mmap_mode="r")
+            mask_path = path.replace(".npy", ".mask.npy")
+            if os.path.exists(mask_path):
+                mask = np.load(mask_path).astype(bool)
+            else:
+                mask = np.ones(arr.shape[0], dtype=bool)
+
+            if cache_in_mem:
+                self.day_data_cache.append(torch.tensor(arr, dtype=torch.float32))
+            else:
+                self.day_data_cache.append(arr)
+            self.valid_masks.append(mask)
+
+        self.info_list = []
+        for file_idx, file_name in enumerate(self.file_names):
+            stem = file_name.split(".")[0]
+            match = re.search(r"(\d{8})", stem)
+            if match is None:
+                raise ValueError(f"Cannot parse date from filename: {file_name}")
+
+            ymd = match.group(1)
+            date = datetime.date(int(ymd[0:4]), int(ymd[4:6]), int(ymd[6:8]))
+            weekday = date.weekday()
+
+            day_data = self.day_data_cache[file_idx]
+            valid_mask = self.valid_masks[file_idx]
+            t_day = day_data.shape[0]
+
+            start_s = self.day_start_step
+            end_limit = t_day if self.day_end_step is None else self.day_end_step
+            end_s = min(end_limit, t_day - (self.window_size + self.pred_size))
+
+            for start_step in range(start_s, end_s, self.hop_size):
+                end_step = start_step + self.window_size + self.pred_size
+                if not valid_mask[start_step:end_step].all():
+                    continue
+                self.info_list.append(
+                    {
+                        "file_idx": file_idx,
+                        "start_step": start_step,
+                        "weekday": weekday,
+                    }
+                )
+
+        print(f"[MPGCN] Total samples = {len(self.info_list)}")
+
     def __len__(self):
-        return len(self.index)
-    
+        return len(self.info_list)
+
     def __getitem__(self, idx):
-        d, t = self.index[idx]
-        
-        # OD Matrix Load
-        # (Window, N, N)
-        # mmap 객체를 슬라이싱하여 copy()하면 메모리로 로드됨
-        x_seq = torch.tensor(self.OD[d][t-self.window:t].copy(), dtype=torch.float32)
-        
-        # Target
-        # (Pred, N, N)
-        y_seq = torch.tensor(self.OD[d][t:t+self.pred].copy(), dtype=torch.float32)
-        
-        # [수정] Log normalization 제거 -> Raw Value 사용
-        
-        return {"x": x_seq, "y": y_seq}
+        info = self.info_list[idx]
+        file_idx = info["file_idx"]
+        start_step = info["start_step"]
+        weekday = info["weekday"]
+
+        day_data = self.day_data_cache[file_idx]
+        x_slice = day_data[start_step:start_step + self.window_size]
+        y_slice = day_data[
+            start_step + self.window_size:
+            start_step + self.window_size + self.pred_size
+        ]
+
+        if isinstance(day_data, torch.Tensor):
+            x_raw = x_slice.to(dtype=torch.float32)
+            y_raw = y_slice.to(dtype=torch.float32)
+        else:
+            x_raw = torch.tensor(np.array(x_slice, copy=True), dtype=torch.float32)
+            y_raw = torch.tensor(np.array(y_slice, copy=True), dtype=torch.float32)
+
+        x = torch.log1p(torch.clamp(x_raw, min=0.0))
+        y = torch.log1p(torch.clamp(y_raw, min=0.0))
+
+        fut_minutes = (
+            torch.arange(self.pred_size) * self.time_resolution
+            + (start_step + self.window_size) * self.time_resolution
+        ) % 1440
+        future_keys = torch.div(
+            fut_minutes,
+            self.dynamic_bin_size,
+            rounding_mode="floor",
+        ).long()
+
+        return {
+            "x": x,
+            "y": y,
+            "x_tensor": x,
+            "y_tensor": y,
+            "weekday_tensor": torch.tensor(weekday, dtype=torch.long),
+            "future_keys": future_keys,
+        }
 
 class MetroODHyperDataset(Dataset):
     """
@@ -1109,6 +1191,43 @@ def get_stdamhgn_dataset(
     )
 
     return trainset, valset
+
+
+def get_mpgcn_dataset(
+    data_root,
+    train_subdir,
+    val_subdir,
+    window_size,
+    hop_size,
+    pred_size,
+    time_resolution,
+    dynamic_bin_size=60,
+    cache_in_mem=True,
+):
+    train_path = os.path.join(data_root, train_subdir)
+    val_path = os.path.join(data_root, val_subdir)
+
+    trainset = MPGCNDataset(
+        data_root=train_path,
+        window_size=window_size,
+        hop_size=hop_size,
+        pred_size=pred_size,
+        time_resolution=time_resolution,
+        dynamic_bin_size=dynamic_bin_size,
+        cache_in_mem=cache_in_mem,
+    )
+    valset = MPGCNDataset(
+        data_root=val_path,
+        window_size=window_size,
+        hop_size=hop_size,
+        pred_size=pred_size,
+        time_resolution=time_resolution,
+        dynamic_bin_size=dynamic_bin_size,
+        cache_in_mem=cache_in_mem,
+    )
+
+    return trainset, valset
+
 
 def get_odformer_dataset(
     data_root,

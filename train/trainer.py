@@ -503,6 +503,110 @@ class MetroGCNLSTMLM(L.LightningModule):
     def configure_optimizers(self):
         return torch.optim.Adam(self.model.parameters(), lr=self.lr)
 
+
+class MPGCNLM(L.LightningModule):
+    def __init__(
+        self,
+        model,
+        static_supports,
+        origin_dynamic_supports,
+        destination_dynamic_supports,
+        loss=None,
+        lr=1e-4,
+        weight_decay=0.0,
+        train_rollout_steps=1,
+        mape_eps=1e-3,
+    ):
+        super().__init__()
+        self.model = model
+        self.loss_fn = loss if loss is not None else torch.nn.MSELoss()
+        self.lr = lr
+        self.weight_decay = weight_decay
+        self.train_rollout_steps = train_rollout_steps
+        self.mape_eps = mape_eps
+
+        self.register_buffer("static_supports", static_supports, persistent=False)
+        self.register_buffer(
+            "origin_dynamic_supports",
+            origin_dynamic_supports,
+            persistent=False,
+        )
+        self.register_buffer(
+            "destination_dynamic_supports",
+            destination_dynamic_supports,
+            persistent=False,
+        )
+
+    def _rollout(self, x, future_keys, steps):
+        context = x
+        preds = []
+        for step_idx in range(steps):
+            dyn_key = future_keys[:, step_idx].reshape(-1).long()
+            dyn_graphs = (
+                torch.index_select(self.origin_dynamic_supports, 0, dyn_key),
+                torch.index_select(self.destination_dynamic_supports, 0, dyn_key),
+            )
+            if dyn_graphs[0].dim() != 4 or dyn_graphs[1].dim() != 4:
+                raise ValueError(
+                    "Indexed dynamic graph must be (B,K,N,N), "
+                    f"got origin={tuple(dyn_graphs[0].shape)}, "
+                    f"dest={tuple(dyn_graphs[1].shape)}"
+                )
+            step_pred = self.model(context, [self.static_supports, dyn_graphs])
+            preds.append(step_pred)
+            context = torch.cat([context[:, 1:], step_pred], dim=1)
+        return torch.cat(preds, dim=1)
+
+    def _compute_metrics(self, y_true, y_pred):
+        y_true = torch.expm1(y_true)
+        y_pred = torch.expm1(torch.clamp(y_pred, min=0.0))
+        diff = y_true - y_pred
+
+        mse = torch.mean(diff ** 2)
+        rmse = torch.sqrt(mse)
+        mae = torch.mean(torch.abs(diff))
+        wmape = torch.sum(torch.abs(diff)) / torch.sum(torch.abs(y_true)) * 100.0
+        smape_all = smape(y_true, y_pred, eps=self.mape_eps)
+        return mse, mae, smape_all, rmse, wmape
+
+    def training_step(self, batch, batch_idx):
+        x = batch["x"]
+        y = batch["y"]
+        future_keys = batch["future_keys"]
+
+        steps = min(self.train_rollout_steps, y.shape[1])
+        preds = self._rollout(x, future_keys, steps)
+        loss = self.loss_fn(preds, y[:, :steps])
+
+        self.log("train/loss", loss, prog_bar=True)
+        return loss
+
+    def validation_step(self, batch, batch_idx):
+        x = batch["x"]
+        y = batch["y"]
+        future_keys = batch["future_keys"]
+
+        preds = self._rollout(x, future_keys, y.shape[1])
+        loss = self.loss_fn(preds, y)
+
+        mse, mae, smape_all, rmse, wmape = self._compute_metrics(y, preds)
+
+        self.log("val/loss", loss, prog_bar=True)
+        self.log("val/rmse", rmse, prog_bar=True)
+        self.log("val/mae", mae, prog_bar=True)
+        self.log("val/smape", smape_all, prog_bar=True)
+        self.log("val/wmape", wmape, prog_bar=True)
+        self.log("val/mse", mse, prog_bar=True)
+        return loss
+
+    def configure_optimizers(self):
+        return torch.optim.Adam(
+            self.model.parameters(),
+            lr=self.lr,
+            weight_decay=self.weight_decay,
+        )
+
+
 class MetroAutoformerODLM(L.LightningModule):
     def __init__(self, model, lr=1e-4, mape_eps=1e-3):
         super().__init__()
