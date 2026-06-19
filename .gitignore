@@ -29,3 +29,32 @@ hypergraphs.pt
 missing_station_geo.csv
 od_hourly_sum_analysis_by_day.csv
 station_to_idx.json
+
+# Experiment outputs
+review_runs/
+ablation_runs/
+evaluate/outputs/
+final_station_analysis/
+
+# Model checkpoints and generated artifacts
+checkpoints/
+artifacts/
+metro-MPGCN/
+st_lstm_artifacts_mta_hourly/
+*.ckpt
+*.pt
+*.pth
+
+# Dataset splits and generated arrays
+data_splits/
+*.npy
+*.npz
+
+# Runtime logs and process markers
+*.log
+*.pid
+*.logpath
+*.wandb
+
+# Generated result files
+train/train_statics_results.json
