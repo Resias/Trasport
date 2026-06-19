@@ -8,6 +8,17 @@ def smape(y_true, y_pred, eps=1e-3):
     denom = (torch.abs(y_true) + torch.abs(y_pred)).clamp(min=eps)
     return 100 * torch.mean(2 * torch.abs(y_pred - y_true) / denom)
 
+
+def balanced_huber(preds, labels, zero_lambda=0.05):
+    pos_mask = labels > 0
+    zero_mask = ~pos_mask
+    zero = labels.new_tensor(0.0)
+
+    loss_pos = F.smooth_l1_loss(preds[pos_mask], labels[pos_mask]) if pos_mask.any() else zero
+    loss_zero = F.smooth_l1_loss(preds[zero_mask], labels[zero_mask]) if zero_mask.any() else zero
+    return loss_pos + zero_lambda * loss_zero
+
+
 class MetroLM(L.LightningModule):
     def __init__(self, model, loss, lr, mape_eps=1e-3):
         super().__init__()
