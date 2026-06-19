@@ -1,5 +1,6 @@
 import pytorch_lightning as L
 import torch
+import torch.nn.functional as F
 from torch.optim import Adam
 from SCIE_Benchmark.ODFormer import build_scaled_laplacian
 
@@ -191,12 +192,28 @@ class MetroGraphLM(L.LightningModule):
 
 
 class MetroGraphWeekLM(L.LightningModule):
-    def __init__(self, model, loss=torch.nn.MSELoss(), lr=1e-3, mape_eps=1e-3):
+    def __init__(
+        self,
+        model,
+        loss=torch.nn.SmoothL1Loss(),
+        lr=1e-3,
+        mape_eps=1e-3,
+        lambda_gate=1.0,
+        gate_tau=0.5,
+        pos_weight_clip=50.0,
+        target_s=None,
+        target_e=None,
+    ):
         super().__init__()
         self.model = model
         self.loss_fn = loss
         self.lr = lr
         self.mape_eps = mape_eps
+        self.lambda_gate = lambda_gate
+        self.gate_tau = gate_tau
+        self.pos_weight_clip = pos_weight_clip
+        self.target_s = target_s
+        self.target_e = target_e
 
     def forward(self, static_edge_index, batch_graph, B, T, time_enc_hist, time_enc_fut, weekday):
         return self.model(static_edge_index, batch_graph, B, T, time_enc_hist, time_enc_fut, weekday)
@@ -205,54 +222,108 @@ class MetroGraphWeekLM(L.LightningModule):
     def _compute_metrics(self, y_true, y_pred):
         # back to original scale
         y_true = torch.expm1(y_true)
-        y_pred = torch.expm1(y_pred)
+        y_pred = torch.expm1(torch.clamp(y_pred, min=0.0))
 
         diff = y_true - y_pred
 
-        # ----- core metrics (no masking) -----
         mse = torch.mean(diff ** 2)
         rmse = torch.sqrt(mse)
         mae = torch.mean(torch.abs(diff))
+        wmape = torch.sum(torch.abs(diff)) / torch.sum(torch.abs(y_true)) * 100.0
+        smape_all = smape(y_true, y_pred, eps=self.mape_eps)
 
-        # ----- MAPE (only where y_true > 0) -----
-        mask = y_true > 0
-        if not mask.any():
-            mape = torch.nan
+        return mse, mae, smape_all, rmse, wmape
+
+    def _loss(self, y_true_log, mag_log, gate_logits):
+        z = (y_true_log > 0).float()
+        num_pos = z.sum()
+        num_tot = z.numel()
+        num_neg = num_tot - num_pos
+        pos_weight = (num_neg / (num_pos + 1e-6)).clamp(max=self.pos_weight_clip)
+
+        gate_loss = F.binary_cross_entropy_with_logits(
+            gate_logits,
+            z,
+            pos_weight=pos_weight,
+        )
+
+        pos_mask = z.bool()
+        if pos_mask.any():
+            mag_loss = self.loss_fn(mag_log[pos_mask], y_true_log[pos_mask])
         else:
-            mape = torch.mean(
-                torch.abs(diff[mask] / torch.clamp(y_true[mask], min=self.mape_eps))
-            ) * 100.0
+            mag_loss = torch.tensor(0.0, device=y_true_log.device)
 
-        # ----- sMAPE (standard definition) -----
-        smape_ = smape(y_true, y_pred, eps=self.mape_eps)
+        total = mag_loss + self.lambda_gate * gate_loss
+        return total, mag_loss, gate_loss, pos_weight.detach()
 
-        return mse, mae, mape, smape_, rmse
-    
+    def _apply_gate(self, mag_log, gate_logits):
+        gate_prob = torch.sigmoid(gate_logits)
+        mag_log_hard = torch.where(
+            gate_prob > self.gate_tau,
+            mag_log,
+            torch.zeros_like(mag_log),
+        )
+        return mag_log_hard, gate_prob
+
+    def _log_local_pair_metrics(self, labels, mag_log_hard, gate_prob):
+        if self.target_s is None or self.target_e is None:
+            return
+
+        local_true = labels[:, :, self.target_s, self.target_e]
+        local_pred = mag_log_hard[:, :, self.target_s, self.target_e]
+        local_gate = gate_prob[:, :, self.target_s, self.target_e]
+
+        local_mse, local_mae, local_smape, local_rmse, local_wmape = self._compute_metrics(
+            local_true,
+            local_pred,
+        )
+        local_true_rate = (local_true > 0).float().mean()
+        local_pred_rate = (local_gate > self.gate_tau).float().mean()
+
+        self.log("val/local_mse", local_mse, prog_bar=False)
+        self.log("val/local_rmse", local_rmse, prog_bar=True)
+        self.log("val/local_mae", local_mae, prog_bar=False)
+        self.log("val/local_smape", local_smape, prog_bar=False)
+        self.log("val/local_wmape", local_wmape, prog_bar=False)
+        self.log("val/local_true_nonzero_rate", local_true_rate, prog_bar=False)
+        self.log("val/local_pred_nonzero_rate", local_pred_rate, prog_bar=False)
+
     def training_step(self, batch, batch_idx):
         # batch is a tuple from graph_collate_fn
         static_edge_index, batch_graph, B, T, labels, time_enc_hist, time_enc_fut, weekday = batch
 
-        # forward
-        preds = self.model(static_edge_index, batch_graph, B, T, time_enc_hist, time_enc_fut, weekday)
-        loss = self.loss_fn(preds, labels)
+        mag_log, gate_logits = self.model(static_edge_index, batch_graph, B, T, time_enc_hist, time_enc_fut, weekday)
+        loss, mag_loss, gate_loss, pos_w = self._loss(labels, mag_log, gate_logits)
 
         self.log("train/loss", loss, prog_bar=True)
+        self.log("train/mag_loss", mag_loss, prog_bar=False)
+        self.log("train/gate_bce", gate_loss, prog_bar=False)
+        self.log("train/pos_weight", pos_w, prog_bar=False)
         return loss
 
     def validation_step(self, batch, batch_idx):
         static_edge_index, batch_graph, B, T, labels, time_enc_hist, time_enc_fut, weekday = batch
 
-        # forward
-        preds = self.model(static_edge_index, batch_graph, B, T, time_enc_hist, time_enc_fut, weekday)
-        loss = self.loss_fn(preds, labels)
-        mse, mae, mape, smape_, rmse = self._compute_metrics(labels, preds)
+        mag_log, gate_logits = self.model(static_edge_index, batch_graph, B, T, time_enc_hist, time_enc_fut, weekday)
+        loss, mag_loss, gate_loss, pos_w = self._loss(labels, mag_log, gate_logits)
+        mag_log_hard, gate_prob = self._apply_gate(mag_log, gate_logits)
+
+        mse, mae, smape_all, rmse, wmape = self._compute_metrics(labels, mag_log_hard)
+        true_rate = (labels > 0).float().mean()
+        pred_rate = (gate_prob > self.gate_tau).float().mean()
 
         self.log("val/loss", loss, prog_bar=True)
+        self.log("val/mag_loss", mag_loss, prog_bar=False)
+        self.log("val/gate_bce", gate_loss, prog_bar=False)
+        self.log("val/pos_weight", pos_w, prog_bar=False)
         self.log("val/rmse", rmse, prog_bar=True)
         self.log("val/mae", mae, prog_bar=True)
-        self.log("val/mape", mape, prog_bar=True)
-        self.log("val/smape", smape_, prog_bar=True)
+        self.log("val/smape", smape_all, prog_bar=True)
+        self.log("val/wmape", wmape, prog_bar=True)
         self.log("val/mse", mse, prog_bar=True)
+        self.log("val/true_nonzero_rate", true_rate, prog_bar=False)
+        self.log("val/pred_nonzero_rate", pred_rate, prog_bar=False)
+        self._log_local_pair_metrics(labels, mag_log_hard, gate_prob)
         return loss
 
     def configure_optimizers(self):

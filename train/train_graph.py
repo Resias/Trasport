@@ -33,15 +33,20 @@ def main():
     parser.add_argument("--window_size", type=int, default=60)
     parser.add_argument("--pred_size", type=int, default=30)
     parser.add_argument("--hop_size", type=int, default=10)
-    parser.add_argument("--batch_size", type=int, default=4)
-    parser.add_argument("--gat_heads", type=int, default=4)
+    parser.add_argument("--batch_size", type=int, default=2)
+    parser.add_argument("--gat_heads", type=int, default=6)
     parser.add_argument("--node_feat_dim", type=int, default=16)
     parser.add_argument("--decode_num_layers", type=int, default=2)
+    parser.add_argument("--target_s", type=int, default=None, help="Optional origin index for local OD-pair validation metrics")
+    parser.add_argument("--target_e", type=int, default=None, help="Optional destination index for local OD-pair validation metrics")
     parser.add_argument("--use_ddp", action="store_true", help="Enable Distributed Data Parallel training")
-    parser.add_argument("--num_workers", type=int, default=4)
+    parser.add_argument("--num_workers", type=int, default=2)
     parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--max_epochs", type=int, default=200)
+    parser.add_argument("--max_epochs", type=int, default=300)
     parser.add_argument("--gat_hidden", type=int, default=64)
+    parser.add_argument("--lambda_gate", type=float, default=1.0)
+    parser.add_argument("--gate_tau", type=float, default=0.9)
+    parser.add_argument("--pos_weight_clip", type=float, default=10.0)
     parser.add_argument("--wandb_project", default="metro-GATrasformer-od-week-latlon")
     args = parser.parse_args()
 
@@ -173,7 +178,12 @@ def main():
     lm = MetroGraphWeekLM(
         model=model,
         loss=torch.nn.SmoothL1Loss(),
-        lr=args.lr
+        lr=args.lr,
+        lambda_gate=args.lambda_gate,
+        gate_tau=args.gate_tau,
+        pos_weight_clip=args.pos_weight_clip,
+        target_s=args.target_s,
+        target_e=args.target_e,
     )
 
     # =====================
@@ -207,6 +217,8 @@ def main():
         strategy=strategy,
         logger=logger,
         log_every_n_steps=50,
+        gradient_clip_val=1.0,
+        gradient_clip_algorithm="norm",
     )
 
     trainer.fit(lm, train_loader, val_loader)
