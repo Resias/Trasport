@@ -16,3 +16,16 @@ metro-odformer/
 metro-GCN-LSTM/
 metro-GATrasformer-od-week-latlon/
 metro-AutoformerOD/
+
+# Tracked data/artifacts kept locally but excluded from future commits
+AD_matrix.csv
+AD_matrix_trimmed_common.csv
+ALL_subway_train_info_20250930.xlsx
+Parsing/line_info.xlsx
+W_matrix.npy
+ad_station_latlon.csv
+dist_matrix.npy
+hypergraphs.pt
+missing_station_geo.csv
+od_hourly_sum_analysis_by_day.csv
+station_to_idx.json
