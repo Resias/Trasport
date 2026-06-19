@@ -1,5 +1,7 @@
 __pycache__/
 wandb/
+applsci-*.pdf
+papers/
 inference_results_time_ordered/
 analysis_results/
 daily_compare/
