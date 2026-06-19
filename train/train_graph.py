@@ -167,7 +167,8 @@ def main():
         gat_hid_dim=args.gat_hidden,
         num_future_steps=args.pred_size,
         decode_num_layers=args.decode_num_layers,
-        node_latlon=node_latlon
+        node_latlon=node_latlon,
+        use_gate_head=True,
     )
 
     model.static_edge_index = static_edge_index

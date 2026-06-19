@@ -271,7 +271,7 @@ class MetroDataset(Dataset):
         window_size,
         hop_size,
         pred_size,
-        time_resolution,
+        time_resolution=1,
         cache_in_mem=True,
     ):
         super().__init__()
@@ -658,7 +658,7 @@ class MPGCNDataset(Dataset):
         window_size,
         hop_size,
         pred_size,
-        time_resolution,
+        time_resolution=1,
         dynamic_bin_size=60,
         cache_in_mem=True,
     ):
@@ -1056,7 +1056,7 @@ class ODFormerMetroDataset(Dataset):
             "weekday": torch.tensor(weekday),
         }
 
-def get_dataset(data_root, train_subdir, val_subdir, window_size, hop_size, pred_size, time_resolution,cache_in_mem=True):
+def get_dataset(data_root, train_subdir, val_subdir, window_size, hop_size, pred_size, time_resolution=1,cache_in_mem=True):
     
     # train_pt = os.path.join(data_root, 'train.pt')
     # val_pt = os.path.join(data_root, 'val.pt')
@@ -1200,7 +1200,7 @@ def get_mpgcn_dataset(
     window_size,
     hop_size,
     pred_size,
-    time_resolution,
+    time_resolution=1,
     dynamic_bin_size=60,
     cache_in_mem=True,
 ):

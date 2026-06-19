@@ -25,6 +25,7 @@ def _infer_graph_week_config(state_dict):
     num_future_steps = state_dict["model.future_step_emb.weight"].shape[0]
     time_enc_dim = state_dict["model.time_enc_linear.weight"].shape[1]
     heads = state_dict["model.short_spatial_encoder.gat1.gat1.att"].shape[1]
+    use_gate_head = "model.gate_origin_proj.weight" in state_dict
 
     layer_ids = {
         int(match.group(1))
@@ -48,6 +49,7 @@ def _infer_graph_week_config(state_dict):
         "weekday_emb_dim": weekday_emb_dim,
         "time_enc_dim": time_enc_dim,
         "node_latlon": node_latlon,
+        "use_gate_head": use_gate_head,
     }
 
 
@@ -89,7 +91,7 @@ def _run_graph_week_batch(lightning_module, batch, device):
     weekday = weekday.to(device)
 
     with torch.no_grad():
-        mag_log, gate_logits = lightning_module.model(
+        output = lightning_module.model(
             static_edge_index,
             batch_graph,
             batch_size,
@@ -98,7 +100,11 @@ def _run_graph_week_batch(lightning_module, batch, device):
             time_fut,
             weekday,
         )
-        mag_log_hard, _ = lightning_module._apply_gate(mag_log, gate_logits)
+        if isinstance(output, tuple):
+            mag_log, gate_logits = output
+            mag_log_hard, _ = lightning_module._apply_gate(mag_log, gate_logits)
+        else:
+            mag_log_hard = output
 
     pred_full = torch.expm1(torch.clamp(mag_log_hard, min=0.0))
     true_full = torch.expm1(labels)

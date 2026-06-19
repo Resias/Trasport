@@ -213,6 +213,7 @@ class GATTransformerODWeek(nn.Module):
         weekday_emb_dim=8,
         time_enc_dim=2,
         node_latlon=None,          # ★ optional
+        use_gate_head=False,
         # period-aware params
         num_self_heads: int = 8,        # period-sparse self-attn heads
         num_cross_heads: int = 8,       # cross-attn heads (to memory)
@@ -224,6 +225,7 @@ class GATTransformerODWeek(nn.Module):
 
         self.num_nodes = num_nodes
         self.future_steps = num_future_steps
+        self.use_gate_head = use_gate_head
 
         self.use_geo = node_latlon is not None
         self.geo_dim = 2 if self.use_geo else 0
@@ -282,17 +284,19 @@ class GATTransformerODWeek(nn.Module):
         self.origin_proj = nn.Linear(gat_hid_dim, gat_hid_dim)
         self.dest_proj = nn.Linear(gat_hid_dim, gat_hid_dim)
         self.future_step_emb = nn.Embedding(self.future_steps, gat_hid_dim)
-        self.gate_origin_proj = nn.Linear(gat_hid_dim, gat_hid_dim)
-        self.gate_dest_proj = nn.Linear(gat_hid_dim, gat_hid_dim)
-        self.gate_bias = nn.Parameter(torch.tensor(-2.0))
+        if self.use_gate_head:
+            self.gate_origin_proj = nn.Linear(gat_hid_dim, gat_hid_dim)
+            self.gate_dest_proj = nn.Linear(gat_hid_dim, gat_hid_dim)
+            self.gate_bias = nn.Parameter(torch.tensor(-2.0))
 
         # init
         nn.init.xavier_uniform_(self.fuse_proj.weight)
         nn.init.xavier_uniform_(self.spatial_fuse_proj.weight)
         nn.init.xavier_uniform_(self.origin_proj.weight)
         nn.init.xavier_uniform_(self.dest_proj.weight)
-        nn.init.xavier_uniform_(self.gate_origin_proj.weight)
-        nn.init.xavier_uniform_(self.gate_dest_proj.weight)
+        if self.use_gate_head:
+            nn.init.xavier_uniform_(self.gate_origin_proj.weight)
+            nn.init.xavier_uniform_(self.gate_dest_proj.weight)
     
     def _repeat_edge_index(self, edge_index: torch.Tensor, B: int, N: int):
         # edge_index: (2, E), node id range [0, N-1]
@@ -387,12 +391,15 @@ class GATTransformerODWeek(nn.Module):
 
         mag_logits = torch.einsum('obid, objd -> obij', H_O, H_D)     # (O,B,N,N)
         mag_log = F.softplus(mag_logits)
+        mag_log = mag_log.permute(1, 0, 2, 3).contiguous()
+
+        if not self.use_gate_head:
+            return mag_log
 
         G_O = self.gate_origin_proj(out)
         G_D = self.gate_dest_proj(out)
         gate_logits = torch.einsum('obid, objd -> obij', G_O, G_D) + self.gate_bias
 
-        mag_log = mag_log.permute(1, 0, 2, 3).contiguous()
         gate_logits = gate_logits.permute(1, 0, 2, 3).contiguous()
         return mag_log, gate_logits
 

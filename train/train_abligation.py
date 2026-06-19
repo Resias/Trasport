@@ -561,6 +561,7 @@ class AblationGATTransformerODWeek(GATTransformerODWeek):
             weekday_emb_dim=weekday_emb_dim,
             time_enc_dim=time_enc_dim,
             node_latlon=node_latlon,
+            use_gate_head=use_gate_head,
         )
         self.use_geo_feature = use_geo_feature
         self.use_weekday_feature = use_weekday_feature
